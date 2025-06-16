@@ -1,0 +1,18 @@
+{
+  "6MQpbiTC2YcogidTmKqMLK82qvE9z5QEm7EP3AEDpump": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.058706781,
+        "priceInSol": 0.01,
+        "timestamp": 1749559554782,
+        "txid": "4PQbZTEJ1aWQtUAs6iZ1WR5weogEbnSySh2XMondcLQZBsRHuAHCodMFw9q7KgEXe4nDhcro7fEAi53ZrRKX4Wbd"
+      }
+    ],
+    "totalBought": 0.058706781,
+    "totalSold": 0,
+    "totalSpentSOL": 0.01,
+    "totalReceivedSOL": 0,
+    "averageBuyPrice": 0.1703380738930312
+  }
+}

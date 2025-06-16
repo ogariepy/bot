@@ -1,0 +1,357 @@
+{
+  "6MQpbiTC2YcogidTmKqMLK82qvE9z5QEm7EP3AEDpump": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.058706781,
+        "priceInSol": 0.01,
+        "timestamp": 1749559554782,
+        "txid": "4PQbZTEJ1aWQtUAs6iZ1WR5weogEbnSySh2XMondcLQZBsRHuAHCodMFw9q7KgEXe4nDhcro7fEAi53ZrRKX4Wbd"
+      },
+      {
+        "type": "buy",
+        "amount": 0.006234918,
+        "priceInSol": 0.001,
+        "timestamp": 1749564446742,
+        "txid": "3kt36A8HC6p6MvjCL6UhVLsngVUw3NHFmXUJHFHrsCvi6ji9CVccQGGYpKReLsu277uBcTXpX55ygvKY3sHyguML"
+      }
+    ],
+    "totalBought": 0.064941699,
+    "totalSold": 0,
+    "totalSpentSOL": 0.011,
+    "totalReceivedSOL": 0,
+    "averageBuyPrice": 0.1693826950847097
+  },
+  "6bEY8kJR5aJMSr3weYPUC6rB9W2DY3PxuKkQyox4pump": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.510299671,
+        "priceInSol": 0.001,
+        "timestamp": 1749563075555,
+        "txid": "2S55QnJAahWtPx9oVDHNiu1hKDuSKT8yu85GG891METVBWfuB7X27gYrEWnhWYm5JUBT7kHFY5EawYUn3ymmNwXT"
+      },
+      {
+        "type": "sell",
+        "amount": 505.019568,
+        "priceInSol": 0.847071153,
+        "timestamp": 1749563373458,
+        "txid": "4ZNDTmUrYewigMqXQwuk6oUgy75J2zahJddY4VvZ6DWwvFFzbBoqww6aEwwjuRKwB6H9BJuCjVHeduSw4JnAWc68"
+      }
+    ],
+    "totalBought": 0.510299671,
+    "totalSold": 505.019568,
+    "totalSpentSOL": 0.001,
+    "totalReceivedSOL": 0.847071153,
+    "averageBuyPrice": 0.001959632852673346,
+    "symbol": "6bEY8k...pump",
+    "name": "Unknown Token"
+  },
+  "mb1eu7TzEc71KxDpsmsKoucSSuuoGLv1drys1oP2jh6": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.42575916,
+        "priceInSol": 0.001,
+        "timestamp": 1749563079429,
+        "txid": "3msj22toK52FVkpaSX88LLvgeaYFqMUCmd4i1LunK3GVmRKWmdPvaJVBWBjs1hofkJLj4X4UmyvCGbFKSVh6Bsxi"
+      },
+      {
+        "type": "sell",
+        "amount": 425.75915999999995,
+        "priceInSol": 0.996163897,
+        "timestamp": 1749563374626,
+        "txid": "5tkXaBZdm4hv7ho78VLJ7dqxHNALTZB2Kmj6KApkp4EfjR8FX6HJkvxfBm1Wj4bK2PqRr65kw6oGMkgccCJnUPgs"
+      },
+      {
+        "type": "sell",
+        "amount": 425.75915999999995,
+        "priceInSol": 0.993286043,
+        "timestamp": 1749564213816,
+        "txid": "37YFZ9TANXZVXpyuGEBkfuxrnkv44QNFtYsJZ7bB563YHL14SsiGdRRdRx2iJHYxLd73FrMGpmgJ6cLZzpqabKyj"
+      }
+    ],
+    "totalBought": 0.42575916,
+    "totalSold": 851.5183199999999,
+    "totalSpentSOL": 0.001,
+    "totalReceivedSOL": 1.98944994,
+    "averageBuyPrice": 0.002348745708724153,
+    "symbol": "mb1eu7...2jh6",
+    "name": "Unknown Token"
+  },
+  "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.005345852,
+        "priceInSol": 0.001,
+        "timestamp": 1749563175725,
+        "txid": "2Uft3bfmt9f9A46n7dPnaAApEH17KT2afwFFeQNzS3aypLru6VG73yxDjz2eVxV3nMmAPw1f9GuqrmFuGi6hCQjv"
+      },
+      {
+        "type": "buy",
+        "amount": 0.005346094,
+        "priceInSol": 0.001,
+        "timestamp": 1749563178944,
+        "txid": "4RVkp2kgdpBpCg1V65ThQe3BJUiH6gNxxQXxkZtBVfiModoozdgycxqWh5PtmYk94BNwX45wHAn2bqszkB3bQRfD"
+      },
+      {
+        "type": "sell",
+        "amount": 0.10684334,
+        "priceInSol": 0.019928182,
+        "timestamp": 1749563375770,
+        "txid": "4xiBPUveTw81VkWL2ix95hLAW5fhAhLddK8WooWWaTR8dp9eZkHJhc58LdGDURphyzJV6StVnuwRHGJwKuBQqHop"
+      }
+    ],
+    "totalBought": 0.010691946,
+    "totalSold": 0.10684334,
+    "totalSpentSOL": 0.002,
+    "totalReceivedSOL": 0.019928182,
+    "averageBuyPrice": 0.1870566873420423,
+    "symbol": "hntyVP...xWux",
+    "name": "Unknown Token"
+  },
+  "ZBCNpuD7YMXzTHB2fhGkGi78MNsHGLRXUhRewNRm9RU": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.04175217,
+        "priceInSol": 0.001,
+        "timestamp": 1749564491076,
+        "txid": "sajdxacC65zCetfHSnDYkPgowRQpGFbakxBi7W8qc7eDmaaJiVHGhVyBK8yr3g4MtTEUmMrvLnEYjivHdVVn18o"
+      },
+      {
+        "type": "buy",
+        "amount": 0.041824053,
+        "priceInSol": 0.001,
+        "timestamp": 1749564493249,
+        "txid": "4eW7sVZXegUFSL67rzwKGxh5zjqp6BFm2ovt36LPvp2TSoDzAevXGnULnn4MAKTHQDgpaozHgqDXaJdAHNF4HkQH"
+      },
+      {
+        "type": "buy",
+        "amount": 0.041731873,
+        "priceInSol": 0.001,
+        "timestamp": 1749564495482,
+        "txid": "5oh8uLwYYQUqqxKTGogT8HsiAM4nwyAWeyWp6Cr1hhx8C8qK7zQHMHjEun4b7xiCgVymMWYbhwsHYD26fcTytp9c"
+      }
+    ],
+    "totalBought": 0.125308096,
+    "totalSold": 0,
+    "totalSpentSOL": 0.003,
+    "totalReceivedSOL": 0,
+    "averageBuyPrice": 0.02394099101146665,
+    "symbol": "ZBCNpu...m9RU",
+    "name": "Unknown Token",
+    "target10Hit": true,
+    "target25Hit": true
+  },
+  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.331049,
+        "priceInSol": 0.001,
+        "timestamp": 1749564540184,
+        "txid": "5Ge4w9mmh3KaYzYzQLoRpVWMez2xiUmuZ56gkgyakQCYCMxptaiEkmQY2khQVNK15vbaJqZVhWVZg6rKUX9idAxS"
+      },
+      {
+        "type": "sell",
+        "amount": 0.000001,
+        "priceInSol": 2e-9,
+        "timestamp": 1749565469985,
+        "txid": "5bqAALirYVsqHTWbcPAua7Ut9LjrMJcz3RCZvbjC2tvRPXYgG9TSE5LisrLcoUqcKuryemLeLcKEPQLVmNvc7jtJ"
+      }
+    ],
+    "totalBought": 0.331049,
+    "totalSold": 0.000001,
+    "totalSpentSOL": 0.001,
+    "totalReceivedSOL": 2e-9,
+    "averageBuyPrice": 0.0030207008630142368,
+    "symbol": "JUP",
+    "name": "Jupiter"
+  },
+  "CrnJaG7NoCRecHqy1f9dp1rwHvWS6nGRLFt9Zcv8UV2Q": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.043091965,
+        "priceInSol": 0.001,
+        "timestamp": 1749564542486,
+        "txid": "hZmkzrXywDvF9LLwUYj9iKSczuWATGANhXZjQQYcS4kkpREWWY94XA41LcgexhG8araWaboHCgTQZ3LUDfhpRoV"
+      },
+      {
+        "type": "sell",
+        "amount": 0.0000025,
+        "priceInSol": 6.3e-8,
+        "timestamp": 1749567604636,
+        "txid": "2k2xAREgHgwgpwZEsjDdqV6vZXHw28YrmFnyposdgH6uw6SHwZNvR2wFMpbmX91SRBx9PSes7ot382K4tt4ufJwJ"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.6e-8,
+        "timestamp": 1750034799004,
+        "txid": "5B8n9X3uoNZ82yMnjtSbAkTeeYM85ZYNbiiCFqhbVdMFjT1awCxL91abhTFFwvvNPKu2PQdhUifmREUscPgjsiR5"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.5e-8,
+        "timestamp": 1750034918848,
+        "txid": "4LneKCz2K9a2sZWgmgy9JA6hhUvrgg4E4zsfDoEhAadebxDxNUfyduCoEmVq845ma9dE8dRYMXq2AXqaH8vfErys"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750097320767,
+        "txid": "D69Kb92XottEGT7YvYsdiyq6vMGBYxpCfjokdQWz4Ru7Wf8RzKr7bHyJjREFDCz5HureG4P9LXP44gQyEtTk5E9"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750097442728,
+        "txid": "4ZS12bhLH6G6YECsHdbzdy2zxxUUJSCuiSaorzCbCVGRwmgzCit35x9YamsUFvJEAZwWDeBVgBctHJHA6aEkRhJw"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750097561313,
+        "txid": "2uUzNMxTdQUuu2PM6F6eGcDNbeQNhTpPckbadhzMh5BGYhx8SYz6fWWqFYS9SsCtxVvdMkST6SKmhmTbbWYa9cvr"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750097679985,
+        "txid": "341hh8RJN6VKiFwct8iE7T8ATXeadU1VhSWCbETebH4L7kzh4NTomv7A7XD2jz459NFidr3LqakteMnCaC3pEaNq"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750099636357,
+        "txid": "3FAP97Pd8sDqJTLA1RkBgVpkJcDUmpUCH8YTPmcVSAR8ksNcNLknSuanmU2k8hrgYihN368fHm68du4qtWcex3ha"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750099756501,
+        "txid": "5o35CJVELogYNx3dZa58JseguVzrQUGqpm6SSrqrDcNZ7aiwkV46fzQfYgb5hPnU2CcysFxwHbV7ABuDGYdzKPkK"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750099875921,
+        "txid": "5bBoJmBBZC2FNWmttvXVKp3utSDmPiMimkqQ7L1zktGdaaaNZxJpZxDLWHGbdMwSXFzQExKYkfY6fdcfFZCENbUp"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750099997593,
+        "txid": "5uFVneWmGLSWqHdgS6RGfqySxtXHVdx3Vo38haykCD4WP637E834dk1sL7SskVf7KRPmC39gw2Z4KfF4tTzbAN51"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750100894584,
+        "txid": "4Be84YEr9AWELGifdRJPG77MbCPndmo1vdfRu2Je8doxtLf2FNpuZAjYu3Q8pXVU4fuAdBBonnmrM3cKpezo4LtJ"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750101008045,
+        "txid": "WGqVgdiXogLz6WcTgzB9bfyEunFHhB5bhjv5q8o847nH9sqYnquafgpiLSRYuZQLQ4mAY2D3H2kUSuMbeGztiAL"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750101135415,
+        "txid": "3Bh2udg8RSytnzW84AaRQ8s2mo2gHqFnchRwXK3B4TC7chbdtYwdLdrmrr9RDi79R3AccQWcsExh3J3QwCzmRZfD"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750101248734,
+        "txid": "2ijoZs7jWZvYkcWPFzc6YQA6UPbijwMMDNN81KbU1DcJWdDW97wS3hmoLkpEb92xdL8rtxqEropTf6fSRuQc9bBk"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750101369040,
+        "txid": "3RunfK9iJxph7BTMzzmM2BrfLQX4b9ZxWyQcskV7SBagL8XLZLsEKS488HfvVaRoNQ3gWaaujduDYNQmd5m3yYQR"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750102468587,
+        "txid": "2HmT8AhbuCBXLvbahAfq6fjQYtLVetzaH4eFwdeGFA4rLaKELbcx9x44nBrAHHhA6iqWMN4XGv6NLU9DgZJcrrhN"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750102588379,
+        "txid": "2MvYgJPkivyo4QturF6KMQsDewrzkhUG9WVxNt4h7jBaTdQKR2seSg8SY2WooXNrHwqUDM1fBG48GcanD6UJMjpn"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 2.1e-8,
+        "timestamp": 1750102711151,
+        "txid": "dmT5GgptnC6VJMZLtFQ2qprCLptpRKYwGYjCd9X4visK7UxY2kDqsbVEkjqs3UA2PQMy6wNDsPweGi1TKa56U1J"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 1.8e-8,
+        "timestamp": 1750102828323,
+        "txid": "61StDWS7dM1GCgZv2QVpddY16LRCRbTxC3FmykVKr2qS8LMsaXMBGosBuhNwiYDaiHykqYrSi3zTdzQMZjM28rcL"
+      },
+      {
+        "type": "sell",
+        "amount": 0.00001,
+        "priceInSol": 1.8e-8,
+        "timestamp": 1750102948381,
+        "txid": "gLe7fcUwJgj4HM5Ku6vgUWeEZbWKjAMdKCBxjTCE5r3wHGbmsECJy1Ggoe2ig7kEggscewsqqYYizUFSm1yEoGa"
+      }
+    ],
+    "totalBought": 0.043091965,
+    "totalSold": 0.0002025,
+    "totalSpentSOL": 0.001,
+    "totalReceivedSOL": 4.859999999999998e-7,
+    "averageBuyPrice": 0.023206182405467003,
+    "symbol": "CrnJaG...UV2Q",
+    "name": "Unknown Token",
+    "target10Hit": true
+  },
+  "METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m": {
+    "trades": [
+      {
+        "type": "buy",
+        "amount": 0.001172896,
+        "priceInSol": 0.001,
+        "timestamp": 1749564544868,
+        "txid": "2weVeccrvH9q7rXLe6cybyVAZFmMZKiUQT8AnvwUuvHvnvYwYqWgeXeRU1paBqzE4igFgiFMBq4VsbMLujgFBwvQ"
+      }
+    ],
+    "totalBought": 0.001172896,
+    "totalSold": 0,
+    "totalSpentSOL": 0.001,
+    "totalReceivedSOL": 0,
+    "averageBuyPrice": 0.8525905110086486,
+    "symbol": "METAew...Y18m",
+    "name": "Unknown Token"
+  }
+}
