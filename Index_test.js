@@ -82,7 +82,6 @@ const RISK_MANAGEMENT = {
     maxDailyLoss: 0.2,            // Stop trading after 20% daily loss
     maxOpenPositions: 10,          // Maximum concurrent positions
     cooldownAfterLoss: 3600000,    // 1hr cooldown after big loss
-    emergencyStopLoss: 0.5,        // Emergency sell at 50% loss
     trailingStopLossPercent: 10,   // Trail by 10%
 };
 
@@ -99,7 +98,7 @@ const COPYTRADE_FILTERS = {
 
 // ====== STATE MANAGEMENT ======
 const walletTokenHoldings = {}; // Track tokens each wallet has held
-const processedSignatures = {}; // One set per wallet
+const processedSignatures = new Set();
 const walletNames = {
     '4CqecFud362LKgALvChyhj6276he3Sy8yKim1uvFNV1m': '4Cq Wallet',
     'j1oxqtEHFn7rUkdABJLmtVtz5fFmHFs4tCG3fWJnkHX': 'j1o Wallet',
@@ -131,7 +130,6 @@ const processedCopytrades = new Set(); // Track already copied trades
 const trailingStopLoss = {}; // { tokenMint: { enabled: true, highestPrice: X, stopPrice: Y } }
 const blacklistedTokens = new Set(); // Tokens to never buy
 const tokenAnalytics = {}; // { tokenMint: { volume24h, priceChange24h, holders, liquidity } }
-let emergencyMode = false; // Emergency sell all positions
 let tradingPaused = false; // Pause all automated trading
 const dailyStats = { trades: 0, profit: 0, loss: 0, startBalance: 0 };
 
@@ -177,178 +175,336 @@ function initializeTrading() {
     }
 }
 
-// ====== MAIN MONITORING FUNCTION ======
+// ====== ENHANCED MONITORING FUNCTION ======
 async function monitorAllWallets() {
     if (!isMonitoring) return;
-
+    
     console.log(`\n🔄 Checking all wallets at ${new Date().toLocaleTimeString()}...`);
-
-    // Check daily loss limit (keep your logic here if needed)
-    if (dailyStats.loss > 0 && dailyStats.profit > 0) {
-        const dailyPL = dailyStats.profit - dailyStats.loss;
-        const dailyPLPercent = (dailyPL / dailyStats.startBalance) * 100;
-
-        if (dailyPLPercent < -RISK_MANAGEMENT.maxDailyLoss * 100) {
-            console.log(`🛑 Daily loss limit reached: ${dailyPLPercent.toFixed(2)}%`);
-            tradingPaused = true;
-            await sendTelegramMessage(
-                `🛑 <b>TRADING PAUSED - DAILY LOSS LIMIT</b>\n\n` +
-                `Daily P/L: ${dailyPL.toFixed(4)} SOL (${dailyPLPercent.toFixed(2)}%)\n` +
-                `Limit: -${RISK_MANAGEMENT.maxDailyLoss * 100}%\n\n` +
-                `Trading will resume tomorrow.`
-            );
-            return;
-        }
-    }
-
+    
     for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
-
-        let pubkey;
+        
         try {
-            pubkey = new PublicKey(walletAddress);
-        } catch (e) {
-            console.error(`❌ Invalid address skipped: ${walletAddress}`);
-            continue;
-        }
-
-        try {
-            // Ensure each wallet has its own processed signatures set
-            if (!processedSignatures[walletAddress]) {
-                processedSignatures[walletAddress] = new Set();
-            }
-            const walletProcessed = processedSignatures[walletAddress];
-
-            // Fetch recent signatures (increase limit if you want more history)
-            const signatures = await connection.getSignaturesForAddress(pubkey, { limit: 30 });
-            console.log(`📝 Found ${signatures.length} recent transactions for ${walletName}`);
-
+            // Get ALL recent signatures for this wallet
+            const signatures = await connection.getSignaturesForAddress(
+                new PublicKey(walletAddress),
+                { limit: 100 }
+            );
+            
+            console.log(`📝 Found ${signatures.length} transactions for ${walletName}`);
+            
+            // Process each signature
+            let processedCount = 0;
+            
             for (const sigInfo of signatures) {
-                if (walletProcessed.has(sigInfo.signature)) continue;
-
-                // Print every signature, regardless of transaction type
-                console.log(`🖊️ Signature: ${sigInfo.signature} | Slot: ${sigInfo.slot} | BlockTime: ${sigInfo.blockTime || 'N/A'}`);
-
-                // Optionally, fetch and print transaction details
+                // Skip already processed or pre-bot-start transactions
+                if (processedSignatures.has(sigInfo.signature) || 
+                    (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime)) {
+                    processedSignatures.add(sigInfo.signature);
+                    continue;
+                }
+                
                 try {
+                    // Get full transaction details
                     const tx = await connection.getParsedTransaction(sigInfo.signature, {
                         maxSupportedTransactionVersion: 0
                     });
-                    if (tx && tx.transaction && tx.transaction.message && tx.transaction.message.instructions) {
-                        const instructionTypes = tx.transaction.message.instructions.map(ix => {
-                            if (ix.programId) return ix.programId.toString();
-                            return 'UnknownProgram';
-                        });
-                        console.log(`   ➡️ Programs in tx: ${instructionTypes.join(', ')}`);
+                    
+                    // Skip if transaction doesn't exist or failed
+                    if (!tx || tx.meta?.err) {
+                        processedSignatures.add(sigInfo.signature);
+                        continue;
                     }
+                    
+                    // Process valid transaction
+                    await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
+                    processedCount++;
+                    
                 } catch (txError) {
-                    console.error(`Error fetching tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
+                    console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
                 }
-
-                walletProcessed.add(sigInfo.signature);
             }
+            
+            if (processedCount > 0) {
+                console.log(`✅ Processed ${processedCount} valid transactions for ${walletName}`);
+            }
+            
         } catch (error) {
-            console.error(`Error fetching signatures for ${walletAddress}: ${error.message}`);
-            continue;
+            console.error(`Error monitoring ${walletName}: ${error.message}`);
         }
-
-        // Rate limit between wallets
+        
+        // Add a small delay between wallets to prevent rate limiting
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
-
+    
+    // Clean up old signatures
+    if (processedSignatures.size > 10000) {
+        const sigArray = Array.from(processedSignatures);
+        sigArray.slice(0, 5000).forEach(sig => processedSignatures.delete(sig));
+        console.log(`🧹 Cleaned up old signatures, kept ${processedSignatures.size}`);
+    }
+    
+    console.log(`✅ Check complete. Next check in ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds.\n`);
+    
     // Schedule next check
     setTimeout(() => monitorAllWallets(), CONFIG.POLLING_INTERVAL_MS);
 }
 
-
-// Analyze transaction for token movements
-async function analyzeTransaction(walletAddress, tx, signature) {
-    if (processedSignatures.has(signature)) return null;
+// Enhanced transaction analyzer that captures ALL transaction types
+async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
+    if (processedSignatures.has(sigInfo.signature)) return;
     
-    const preBalances = tx.meta.preTokenBalances || [];
-    const postBalances = tx.meta.postTokenBalances || [];
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const walletPubkey = new PublicKey(walletAddress);
     
-    // Debug log
-    console.log(`\n🔍 Analyzing tx ${signature.slice(0, 8)}... for ${shortenAddress(walletAddress)}`);
-    console.log(`   Pre-balances: ${preBalances.length}, Post-balances: ${postBalances.length}`);
+    console.log(`\n🔍 Analyzing tx ${sigInfo.signature.slice(0, 8)}... for ${walletName}`);
     
-    // Create a complete map of all balance changes in this transaction
-    const allTokens = new Map();
+    // Transaction details
+    const txTime = sigInfo.blockTime ? new Date(sigInfo.blockTime * 1000).toLocaleString() : 'Unknown time';
+    const success = !tx.meta?.err;
+    const fee = (tx.meta?.fee || 0) / 1e9; // Convert lamports to SOL
     
-    // First, add all tokens from pre-balances
-    preBalances.forEach(balance => {
-        if (balance.owner === walletAddress) {
-            allTokens.set(balance.mint, {
-                mint: balance.mint,
-                pre: balance.uiTokenAmount.uiAmount || 0,
-                post: 0,
-                decimals: balance.uiTokenAmount.decimals
-            });
+    // Analyze different aspects of the transaction
+    const solTransfers = analyzeSolTransfers(tx, walletAddress);
+    const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
+    const programInteractions = analyzeProgramInteractions(tx, walletAddress);
+    
+    // Build comprehensive notification
+    let message = `📋 <b>TRANSACTION DETECTED</b>\n\n`;
+    message += `👛 Wallet: <b>${walletName}</b>\n`;
+    message += `<code>${walletAddress}</code>\n`;
+    message += `⏰ Time: ${txTime}\n`;
+    message += `✅ Status: ${success ? 'Success' : 'Failed'}\n`;
+    message += `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
+    
+    // Add SOL transfers
+    if (solTransfers.length > 0) {
+        message += `<b>💰 SOL Transfers:</b>\n`;
+        for (const transfer of solTransfers) {
+            const emoji = transfer.direction === 'in' ? '📥' : '📤';
+            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${transfer.amount.toFixed(4)} SOL ${transfer.direction === 'in' ? 'from' : 'to'} ${shortenAddress(transfer.counterparty)}\n`;
         }
-    });
+        message += '\n';
+    }
     
-    // Then update/add from post-balances
-    postBalances.forEach(balance => {
-        if (balance.owner === walletAddress) {
-            if (allTokens.has(balance.mint)) {
-                allTokens.get(balance.mint).post = balance.uiTokenAmount.uiAmount || 0;
-            } else {
-                allTokens.set(balance.mint, {
-                    mint: balance.mint,
-                    pre: 0,
-                    post: balance.uiTokenAmount.uiAmount || 0,
-                    decimals: balance.uiTokenAmount.decimals
-                });
+    // Add token transfers
+    if (tokenTransfers.length > 0) {
+        message += `<b>🪙 Token Transfers:</b>\n`;
+        for (const transfer of tokenTransfers) {
+            const emoji = transfer.direction === 'in' ? '📥' : '📤';
+            const tokenInfo = await getTokenInfo(transfer.mint);
+            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${formatNumber(transfer.amount)} ${tokenInfo.symbol}\n`;
+            if (transfer.direction === 'in' && transfer.isNewToken) {
+                message += `   🆕 NEW TOKEN ACQUIRED!\n`;
             }
         }
-    });
+        message += '\n';
+    }
     
-    console.log(`   Found ${allTokens.size} tokens with balance changes`);
+    // Add program interactions
+    if (programInteractions.length > 0) {
+        message += `<b>🔧 Program Interactions:</b>\n`;
+        const uniquePrograms = [...new Set(programInteractions.map(p => p.name))];
+        uniquePrograms.forEach(program => {
+            message += `• ${program}\n`;
+        });
+        message += '\n';
+    }
     
-    // Now process each token that had any balance change
-    let foundTransfer = false;
-    let transactionTypes = [];
+    // Transaction signature
+    message += `🔗 <a href="https://solscan.io/tx/${sigInfo.signature}">View on Solscan</a>`;
     
-    for (const [mint, balances] of allTokens) {
-        const change = balances.post - balances.pre;
-        
-        // Skip if no change
-        if (change === 0) continue;
-        
-        // Skip tiny dust amounts
-        if (Math.abs(change) < 0.000001) continue;
-        
-        // For WSOL, show all changes above 0.0001 SOL (~$0.01)
-        if (mint === CONFIG.WSOL_ADDRESS && Math.abs(change) < 0.0001) continue;
-        
-        // For USDC, show all changes above $0.01
-        if (mint === CONFIG.USDC_ADDRESS && Math.abs(change) < 0.01) continue;
-        
-        foundTransfer = true;
-        
-        // Get token info
-        const tokenInfo = await getTokenInfo(mint);
-        console.log(`💱 ${change > 0 ? 'RECEIVED' : 'SENT'}: ${Math.abs(change)} ${tokenInfo.symbol || shortenAddress(mint)}`);
-        
-        if (change > 0) {
-            // Token received
-            await handleTokenReceived(walletAddress, mint, change, signature, balances.pre === 0);
-            transactionTypes.push('received');
-            
-            // Check for copytrade
-            await handleCopytrade(walletAddress, mint, true);
-        } else if (change < 0) {
-            // Token sent/sold
-            await handleTokenSent(walletAddress, mint, Math.abs(change), signature, balances.post === 0);
-            transactionTypes.push('sent');
+    // Create inline keyboard with relevant actions
+    const keyboard = {
+        inline_keyboard: []
+    };
+    
+    // Add buy/sell buttons for token transfers
+    if (tokenTransfers.length > 0) {
+        for (const transfer of tokenTransfers) {
+            if (transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
+                const tokenInfo = await getTokenInfo(transfer.mint);
+                keyboard.inline_keyboard.push([
+                    { text: `💰 Buy ${tokenInfo.symbol}`, callback_data: `buy_0.01_${transfer.mint}` },
+                    { text: `📊 Price ${tokenInfo.symbol}`, callback_data: `price_${transfer.mint}` },
+                    { text: `📈 Chart`, url: `https://dexscreener.com/solana/${transfer.mint}` }
+                ]);
+            }
+        }
+    }
+    
+    // Add general transaction buttons
+    keyboard.inline_keyboard.push([
+        { text: '🔍 Solscan', url: `https://solscan.io/tx/${sigInfo.signature}` },
+        { text: '👛 View Wallet', url: `https://solscan.io/account/${walletAddress}` }
+    ]);
+    
+    // Send notification
+    await sendTelegramMessage(message, { reply_markup: keyboard });
+    
+    // Handle copytrading for token buys
+    for (const transfer of tokenTransfers) {
+        if (transfer.direction === 'in' && transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
+            await handleCopytrade(walletAddress, transfer.mint, true);
         }
     }
     
     // Mark as processed
-    processedSignatures.add(signature);
+    processedSignatures.add(sigInfo.signature);
     
-    return foundTransfer ? { types: transactionTypes } : null;
+    console.log(`✅ Transaction ${sigInfo.signature.slice(0, 8)}... fully analyzed`);
+}
+
+// Analyze SOL transfers in transaction
+function analyzeSolTransfers(tx, walletAddress) {
+    const transfers = [];
+    
+    if (!tx.meta) return transfers;
+    
+    // Get account keys
+    const accountKeys = tx.transaction.message.accountKeys || tx.transaction.message.staticAccountKeys || [];
+    
+    // Find wallet index
+    let walletIndex = -1;
+    for (let i = 0; i < accountKeys.length; i++) {
+        const key = accountKeys[i].pubkey || accountKeys[i];
+        if (key.toString() === walletAddress) {
+            walletIndex = i;
+            break;
+        }
+    }
+    
+    if (walletIndex === -1) return transfers;
+    
+    // Calculate SOL balance change
+    const preBalance = tx.meta.preBalances[walletIndex] || 0;
+    const postBalance = tx.meta.postBalances[walletIndex] || 0;
+    const balanceChange = (postBalance - preBalance) / 1e9; // Convert to SOL
+    
+    // Skip if no significant change (accounting for fees)
+    if (Math.abs(balanceChange) < 0.000001) return transfers;
+    
+    // Try to identify counterparty
+    for (let i = 0; i < accountKeys.length; i++) {
+        if (i === walletIndex) continue;
+        
+        const otherPreBalance = tx.meta.preBalances[i] || 0;
+        const otherPostBalance = tx.meta.postBalances[i] || 0;
+        const otherChange = (otherPostBalance - otherPreBalance) / 1e9;
+        
+        // If this account had opposite change, it's likely the counterparty
+        if (Math.abs(otherChange + balanceChange) < 0.001) {
+            const counterparty = (accountKeys[i].pubkey || accountKeys[i]).toString();
+            transfers.push({
+                direction: balanceChange > 0 ? 'in' : 'out',
+                amount: Math.abs(balanceChange),
+                counterparty: counterparty,
+                type: 'SOL'
+            });
+            break;
+        }
+    }
+    
+    // If no counterparty found but balance changed, record as unknown
+    if (transfers.length === 0 && Math.abs(balanceChange) > 0.001) {
+        transfers.push({
+            direction: balanceChange > 0 ? 'in' : 'out',
+            amount: Math.abs(balanceChange),
+            counterparty: 'Unknown',
+            type: 'SOL'
+        });
+    }
+    
+    return transfers;
+}
+
+// Analyze token transfers in transaction
+function analyzeTokenTransfers(tx, walletAddress) {
+    const transfers = [];
+    
+    if (!tx.meta) return transfers;
+    
+    const preBalances = tx.meta.preTokenBalances || [];
+    const postBalances = tx.meta.postTokenBalances || [];
+    
+    // Create maps for easier lookup
+    const preMap = new Map();
+    const postMap = new Map();
+    
+    preBalances.forEach(balance => {
+        if (balance.owner === walletAddress) {
+            preMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+        }
+    });
+    
+    postBalances.forEach(balance => {
+        if (balance.owner === walletAddress) {
+            postMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+        }
+    });
+    
+    // Check all mints that appear in either pre or post
+    const allMints = new Set([...preMap.keys(), ...postMap.keys()]);
+    
+    for (const mint of allMints) {
+        const preAmount = preMap.get(mint) || 0;
+        const postAmount = postMap.get(mint) || 0;
+        const change = postAmount - preAmount;
+        
+        if (Math.abs(change) > 0.000001) {
+            transfers.push({
+                mint: mint,
+                direction: change > 0 ? 'in' : 'out',
+                amount: Math.abs(change),
+                isNewToken: preAmount === 0 && postAmount > 0,
+                isFullSell: preAmount > 0 && postAmount === 0,
+                type: 'TOKEN'
+            });
+        }
+    }
+    
+    return transfers;
+}
+
+// Analyze program interactions
+function analyzeProgramInteractions(tx, walletAddress) {
+    const interactions = [];
+    const knownPrograms = {
+        '11111111111111111111111111111111': 'System Program',
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA': 'Token Program',
+        'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL': 'Associated Token Program',
+        'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': 'Jupiter v6',
+        'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': 'Orca Whirlpool',
+        '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': 'Raydium V4',
+        'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': 'Raydium CLMM',
+        'MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky': 'Mercurial',
+        'SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ': 'Saber',
+        'EewxydAPCCVuNEyrVN68PuSYdQ7wKn27V9Gjeoi8dy3S': 'Lifinity',
+        'CURVGoZn8zycx6FXwwevgBTB2gVvdbGTEpvMJDbgs2t4': 'Curve',
+        '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP': 'Orca V2',
+        'DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1': 'Orca V1',
+        '9wFFyRfZBsuAha4YcuxcXLKwMxJR43S7fPfQLusDBzvT': 'Serum DEX V3',
+        'EUqojwWA2rd19FZrzeBncJsm38Jm1hEhE3zsmX3bRc2o': 'Serum DEX V2',
+        '22Y43yTVxuUkoRKdm9thyRhQ3SdgQS7c7kB6UNCiaczD': 'Serum DEX V1'
+    };
+    
+    if (!tx.transaction?.message?.instructions) return interactions;
+    
+    const instructions = tx.transaction.message.instructions;
+    
+    for (const instruction of instructions) {
+        const programId = instruction.programId?.toString() || instruction.program;
+        if (programId) {
+            const programName = knownPrograms[programId] || `Unknown (${shortenAddress(programId)})`;
+            interactions.push({
+                programId: programId,
+                name: programName
+            });
+        }
+    }
+    
+    return interactions;
 }
 
 // ====== NOTIFICATION HANDLERS ======
@@ -984,37 +1140,6 @@ bot.on('callback_query', async (callbackQuery) => {
             return;
         }
         
-        // Handle emergency stop
-        if (data === 'emergency_stop') {
-            emergencyMode = true;
-            await bot.answerCallbackQuery(callbackQuery.id, {
-                text: 'EMERGENCY STOP ACTIVATED!'
-            });
-            
-            await bot.sendMessage(chatId,
-                `🚨 <b>EMERGENCY MODE ACTIVATED</b>\n\n` +
-                `All automated trading is now STOPPED.\n` +
-                `Selling all positions...\n\n` +
-                `Please wait...`,
-                { parse_mode: 'HTML' }
-            );
-            
-            // Sell all positions
-            for (const tokenMint of Object.keys(tradeHistory)) {
-                const position = tradeHistory[tokenMint];
-                if (position.totalBought > position.totalSold) {
-                    const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-                    if (balance > 0) {
-                        await sellToken(tokenMint, null, 100);
-                    }
-                }
-            }
-            
-            emergencyMode = false;
-            await bot.sendMessage(chatId, `✅ All positions closed. Bot is now in safe mode.`);
-            return;
-        }
-        
         // Handle pause/resume trading
         if (data === 'pause_trading') {
             tradingPaused = !tradingPaused;
@@ -1389,7 +1514,6 @@ bot.onText(/\/start/, async (msg) => {
             ],
             [
                 { text: tradingPaused ? '▶️ Resume Trading' : '⏸️ Pause Trading', callback_data: 'pause_trading' },
-                { text: '🚨 Emergency Stop', callback_data: 'emergency_stop' },
             ],
             [
                 { text: '🔄 Refresh', callback_data: 'cmd_start' }
@@ -1409,7 +1533,6 @@ bot.onText(/\/help/, async (msg) => {
         `• Auto Profit Targets: 10%, 25%, 50%, 100%\n` +
         `• Trailing Stop Loss: Follows price up\n` +
         `• Smart Copytrade Filters: Min liquidity/holders\n` +
-        `• Emergency Stop Loss: -50% protection\n` +
         `• Daily Loss Limit: -20% max\n\n` +
         `<b>📱 Commands:</b>\n` +
         `/start - Main dashboard\n` +
@@ -1820,13 +1943,13 @@ async function passesTradeFilters(tokenMint, amount = CONFIG.COPYTRADE_AMOUNT_SO
         
         // Check liquidity
         if (analytics.liquidity < COPYTRADE_FILTERS.minLiquidity) {
-            console.log(`❌ Low liquidity: $${analytics.liquidity} < $${COPYTRADE_FILTERS.minLiquidity}`);
+            console.log(`❌ Low liquidity: ${analytics.liquidity} < ${COPYTRADE_FILTERS.minLiquidity}`);
             return false;
         }
         
         // Check market cap
         if (analytics.marketCap < COPYTRADE_FILTERS.minMarketCap) {
-            console.log(`❌ Low market cap: $${analytics.marketCap} < $${COPYTRADE_FILTERS.minMarketCap}`);
+            console.log(`❌ Low market cap: ${analytics.marketCap} < ${COPYTRADE_FILTERS.minMarketCap}`);
             return false;
         }
         
@@ -2009,43 +2132,6 @@ async function checkProfitTargets(tokenMint) {
     }
 }
 
-// Monitor all positions for trailing stops and profit targets
-async function monitorPositions() {
-    if (tradingPaused || emergencyMode) return;
-    
-    console.log('📊 Monitoring positions for profit targets and trailing stops...');
-    
-    for (const tokenMint of Object.keys(tradeHistory)) {
-        const position = tradeHistory[tokenMint];
-        if (position.totalBought > position.totalSold) {
-            await updateTrailingStopLoss(tokenMint);
-            await checkProfitTargets(tokenMint);
-            
-            // Check emergency stop loss
-            const currentPrice = await getTokenPrice(tokenMint);
-            if (currentPrice && position.averageBuyPrice) {
-                const lossPercent = ((position.averageBuyPrice - currentPrice) / position.averageBuyPrice) * 100;
-                
-                if (lossPercent > RISK_MANAGEMENT.emergencyStopLoss * 100) {
-                    console.log(`🚨 Emergency stop loss triggered for ${tokenMint}!`);
-                    const tokenInfo = await getTokenInfo(tokenMint);
-                    await sendTelegramMessage(
-                        `🚨 <b>EMERGENCY STOP LOSS!</b>\n\n` +
-                        `Token: ${tokenInfo.symbol}\n` +
-                        `Loss: -${lossPercent.toFixed(2)}%\n` +
-                        `Selling entire position to prevent further losses...`,
-                        { parse_mode: 'HTML' }
-                    );
-                    
-                    const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-                    if (balance > 0) {
-                        await sellToken(tokenMint, null, 100);
-                    }
-                }
-            }
-        }
-    }
-}
 
 // ====== TRADE TRACKING FUNCTIONS ======
 function loadTradeHistory() {
@@ -2154,7 +2240,64 @@ async function calculateProfitLoss(tokenMint) {
         totalSold: history.totalSold
     };
 }
-
+// Monitor open positions for profit targets and trailing stops
+async function monitorPositions() {
+    if (tradingPaused) return;
+    
+    console.log(`\n📊 Monitoring positions at ${new Date().toLocaleTimeString()}...`);
+    
+    // Update SOL price first
+    await getSolPriceUSD();
+    
+    // Get all positions with open balances
+    for (const [tokenMint, history] of Object.entries(tradeHistory)) {
+        // Skip if no open position
+        if (history.totalBought <= history.totalSold) continue;
+        
+        try {
+            // Get current balance
+            const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
+            if (balance === 0) continue;
+            
+            // Get current price
+            const currentPrice = await getTokenPrice(tokenMint);
+            if (!currentPrice) continue;
+            
+            const tokenInfo = await getTokenInfo(tokenMint);
+            const profitPercent = ((currentPrice - history.averageBuyPrice) / history.averageBuyPrice) * 100;
+            
+            console.log(`📊 ${tokenInfo.symbol}: ${profitPercent >= 0 ? '+' : ''}${profitPercent.toFixed(2)}% (${currentPrice.toFixed(8)} SOL)`);
+            
+            // Check profit targets
+            await checkProfitTargets(tokenMint);
+            
+            // Update trailing stop loss
+            await updateTrailingStopLoss(tokenMint);
+            
+            // Check if position is at risk (optional warning)
+            if (profitPercent < -20 && !history.riskWarningsSent) {
+                history.riskWarningsSent = true;
+                await sendTelegramMessage(
+                    `⚠️ <b>POSITION AT RISK</b>\n\n` +
+                    `Token: ${tokenInfo.symbol}\n` +
+                    `Loss: ${profitPercent.toFixed(2)}%\n` +
+                    `Current Price: ${currentPrice.toFixed(8)} SOL\n` +
+                    `Avg Buy Price: ${history.averageBuyPrice.toFixed(8)} SOL\n\n` +
+                    `Consider setting a stop loss or reducing position size.`,
+                    { parse_mode: 'HTML' }
+                );
+            }
+            
+        } catch (error) {
+            console.error(`Error monitoring position ${tokenMint}: ${error.message}`);
+        }
+        
+        // Small delay between positions
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log(`✅ Position monitoring complete\n`);
+}
 // ====== HELPER FUNCTIONS ======
 function shortenAddress(address) {
     if (!address || address.length < 10) return address;
@@ -2340,4 +2483,4 @@ async function handleCopytrade(walletAddress, tokenMint, isBuying) {
             );
         }
     }
-}n 
+}
