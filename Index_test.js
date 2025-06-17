@@ -180,14 +180,14 @@ function initializeTrading() {
 // ====== MAIN MONITORING FUNCTION ======
 async function monitorAllWallets() {
     if (!isMonitoring) return;
-    
+
     console.log(`\n🔄 Checking all wallets at ${new Date().toLocaleTimeString()}...`);
-    
+
     // Check daily loss limit
     if (dailyStats.loss > 0 && dailyStats.profit > 0) {
         const dailyPL = dailyStats.profit - dailyStats.loss;
         const dailyPLPercent = (dailyPL / dailyStats.startBalance) * 100;
-        
+
         if (dailyPLPercent < -RISK_MANAGEMENT.maxDailyLoss * 100) {
             console.log(`🛑 Daily loss limit reached: ${dailyPLPercent.toFixed(2)}%`);
             tradingPaused = true;
@@ -195,96 +195,104 @@ async function monitorAllWallets() {
                 `🛑 <b>TRADING PAUSED - DAILY LOSS LIMIT</b>\n\n` +
                 `Daily P/L: ${dailyPL.toFixed(4)} SOL (${dailyPLPercent.toFixed(2)}%)\n` +
                 `Limit: -${RISK_MANAGEMENT.maxDailyLoss * 100}%\n\n` +
-                `Trading will resume tomorrow.`
+                `Trading will resume demain.`
             );
             return;
         }
     }
-    
+
     for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
 
         let pubkey;
-        // Vérification de la validité de l'adresse
         try {
             pubkey = new PublicKey(walletAddress);
         } catch (e) {
             console.error(`❌ Adresse invalide ignorée : ${walletAddress}`);
-            continue; // Passe à l’adresse suivante si l'adresse est invalide
+            continue;
         }
-        
+
         try {
             // Get recent signatures for this wallet
-            const signatures = await connection.getSignaturesForAddress(
-                pubkey,
-                { limit: 30 }
-            );
-            
+            const signatures = await connection.getSignaturesForAddress(pubkey, { limit: 30 });
             console.log(`📝 Found ${signatures.length} recent transactions for ${walletName}`);
-            
-            // Process each signature
+
             let processedCount = 0;
             let receivedCount = 0;
             let sentCount = 0;
-            
+
             for (const sigInfo of signatures) {
                 if (processedSignatures.has(sigInfo.signature)) continue;
-                
+
                 // Skip transactions from before bot started
                 if (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime) {
                     processedSignatures.add(sigInfo.signature);
                     continue;
                 }
-                
+
                 try {
-                    // Get parsed transaction
+                    // Récupère la transaction (parsed ou non)
                     const tx = await connection.getParsedTransaction(sigInfo.signature, {
                         maxSupportedTransactionVersion: 0
                     });
-                    
-                    if (!tx || !tx.meta || tx.meta.err) continue;
-                    
-                    // Count transaction types before processing
-                    const result = await analyzeTransaction(walletAddress, tx, sigInfo.signature);
-                    if (result && result.types) {
-                        result.types.forEach(type => {
-                            if (type === 'received') receivedCount++;
-                            else if (type === 'sent') sentCount++;
+
+                    // Log toutes les signatures, même si tx ou tx.meta est null
+                    console.log(`🖊️ Signature: ${sigInfo.signature} | Slot: ${sigInfo.slot} | BlockTime: ${sigInfo.blockTime || 'N/A'}`);
+
+                    if (tx && tx.transaction && tx.transaction.message && tx.transaction.message.instructions) {
+                        const instructionTypes = tx.transaction.message.instructions.map(ix => {
+                            if (ix.programId) return ix.programId.toString();
+                            return 'UnknownProgram';
                         });
+                        console.log(`   ➡️ Programs in tx: ${instructionTypes.join(', ')}`);
                     }
-                    processedCount++;
-                    
+
+                    // Analyse les transferts de tokens uniquement si tx.meta existe et pas d'erreur
+                    if (tx && tx.meta && !tx.meta.err) {
+                        const result = await analyzeTransaction(walletAddress, tx, sigInfo.signature);
+                        if (result && result.types) {
+                            result.types.forEach(type => {
+                                if (type === 'received') receivedCount++;
+                                else if (type === 'sent') sentCount++;
+                            });
+                        }
+                        processedCount++;
+                    }
+
+                    processedSignatures.add(sigInfo.signature);
+
                 } catch (txError) {
                     console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
                 }
             }
-            
+
             if (processedCount > 0) {
                 console.log(`✅ Processed ${processedCount} transactions (${receivedCount} receives, ${sentCount} sends)`);
             }
-            
+
         } catch (error) {
             console.error(`Erreur lors de la récupération des signatures pour ${walletAddress} : ${error.message}`);
-            continue; // Passe à l’adresse suivante en cas d'erreur réseau ou RPC
+            continue;
         }
-        
+
         // Add a small delay between wallets to prevent rate limiting
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    
+
     // Clean up old signatures
     if (processedSignatures.size > 10000) {
         const sigArray = Array.from(processedSignatures);
         sigArray.slice(0, 5000).forEach(sig => processedSignatures.delete(sig));
         console.log(`🧹 Cleaned up old signatures, kept ${processedSignatures.size}`);
     }
-    
+
     console.log(`✅ Check complete. Next check in ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds.\n`);
-    
+
     // Schedule next check
     setTimeout(() => monitorAllWallets(), CONFIG.POLLING_INTERVAL_MS);
 }
+
 
 // Analyze transaction for token movements
 async function analyzeTransaction(walletAddress, tx, signature) {
