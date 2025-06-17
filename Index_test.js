@@ -186,10 +186,10 @@ async function monitorAllWallets() {
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
         
         try {
-            // Get ALL recent signatures for this wallet (increased limit)
+            // Get ALL recent signatures for this wallet
             const signatures = await connection.getSignaturesForAddress(
                 new PublicKey(walletAddress),
-                { limit: 100 } // Increased from 30 to get more transactions
+                { limit: 100 }
             );
             
             console.log(`📝 Found ${signatures.length} transactions for ${walletName}`);
@@ -198,7 +198,10 @@ async function monitorAllWallets() {
             let processedCount = 0;
             
             for (const sigInfo of signatures) {
-                if (processedSignatures.has(sigInfo.signature)) continue;
+                // Skip already processed signatures
+                if (processedSignatures.has(sigInfo.signature)) {
+                    continue;
+                }
                 
                 // Skip transactions from before bot started
                 if (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime) {
@@ -212,23 +215,23 @@ async function monitorAllWallets() {
                         maxSupportedTransactionVersion: 0
                     });
                     
-                    // Skip if transaction is not found or failed
+                    // Skip if transaction doesn't exist or failed
                     if (!tx || tx.meta?.err) {
                         processedSignatures.add(sigInfo.signature);
                         continue;
                     }
                     
-                    // Process ALL types of transactions
+                    // Process valid transaction
                     await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
                     processedCount++;
                     
                 } catch (txError) {
-                    console.error(`Error processing tx ${sigInfo.signature.slice(0,8)}...: ${txError.message}`);
+                    console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
                 }
             }
             
             if (processedCount > 0) {
-                console.log(`✅ Processed ${processedCount} transactions for ${walletName}`);
+                console.log(`✅ Processed ${processedCount} valid transactions for ${walletName}`);
             }
             
         } catch (error) {
@@ -519,16 +522,17 @@ async function handleTokenReceived(walletAddress, tokenMint, amount, signature, 
     // Get token analytics for display
     const analytics = await getTokenAnalytics(tokenMint);
     
-    const message = `${emoji} <b>${action}</b>
-
-👛 Wallet: <b>${walletName}</b>
-<code>${walletAddress}</code>
-🪙 Token: <b>${tokenInfo.symbol}</b> ${tokenInfo.name !== 'Unknown Token' ? `(${tokenInfo.name})` : ''}
-📊 Amount: +${formatNumber(amount)}
-💧 Liquidity: ${formatNumber(analytics.liquidity)}
-👥 Holders: ${analytics.holders}
-🆔 Token: ${shortenAddress(tokenMint)}
-🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
+    // Format token address for display
+    const shortenedTokenMint = shortenAddress(tokenMint);
+    
+    const message = `${emoji} <b>${action}</b>\n\n` +
+        `👛 Wallet: <b>${walletName}</b>\n` +
+        `<code>${walletAddress}</code>\n` +
+        `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+        `📊 Amount: +${formatNumber(amount)}\n` +
+        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+        `👥 Holders: ${analytics.holders}\n` +
+        `🆔 ${shortenedTokenMint}`;
     
     const keyboard = {
         inline_keyboard: [
@@ -545,7 +549,7 @@ async function handleTokenReceived(walletAddress, tokenMint, amount, signature, 
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
                 { text: '💼 Balance', callback_data: `balance_${tokenMint}` },
-                { text: '📈 Chart', url: `https://dexscreener.com/solana?token=${tokenMint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
             ],
             [
                 { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` },
@@ -577,14 +581,15 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
     const emoji = isFullSell ? '🔴' : '🟠';
     const action = isFullSell ? 'FULL SELL' : 'TOKEN SOLD';
     
-    const message = `${emoji} <b>${action}</b>
-
-👛 Wallet: <b>${walletName}</b>
-<code>${walletAddress}</code>
-🪙 Token: <b>${tokenInfo.symbol}</b> ${tokenInfo.name !== 'Unknown Token' ? `(${tokenInfo.name})` : ''}
-📊 Amount: -${formatNumber(amount)}
-🆔 Token: ${shortenAddress(tokenMint)}
-🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
+    // Format token address for display
+    const shortenedTokenMint = shortenAddress(tokenMint);
+    
+    const message = `${emoji} <b>${action}</b>\n\n` +
+        `👛 Wallet: <b>${walletName}</b>\n` +
+        `<code>${walletAddress}</code>\n` +
+        `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+        `📊 Amount: -${formatNumber(amount)}\n` +
+        `🆔 ${shortenedTokenMint}`;
     
     const keyboard = {
         inline_keyboard: [
@@ -600,7 +605,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
             ],
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
-                { text: '📈 Chart', url: `https://dexscreener.com/solana?token=${tokenMint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
                 { text: '📊 P/L Report', callback_data: `pl_${tokenMint}` },
             ],
             [
@@ -617,6 +622,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
     await sendTelegramMessage(message, { reply_markup: keyboard });
     console.log(`${emoji} ${action} detected: ${tokenInfo.symbol} by ${walletName}`);
 }
+
 
 // ====== PRICE FUNCTIONS ======
 async function getSolPriceUSD() {
@@ -2365,7 +2371,7 @@ async function getTokenInfo(tokenAddress) {
             if (metadataResponse.data && metadataResponse.data.length > 0) {
                 const metadata = metadataResponse.data[0];
                 return {
-                    symbol: metadata.symbol || metadata.onChainMetadata?.symbol || 'Unknown',
+                    symbol: metadata.symbol || metadata.onChainMetadata?.symbol || shortenAddress(tokenAddress),
                     name: metadata.name || metadata.onChainMetadata?.name || 'Unknown Token',
                     decimals: metadata.decimals || 9
                 };
