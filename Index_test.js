@@ -10,33 +10,11 @@ const {
 } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
-
-async function fetchWithRetry(url, options, retries = 3) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const response = await fetch(url, options);
-            if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-            return await response.json();
-        } catch (error) {
-            if (i === retries - 1) throw error;
-            console.warn(`Retrying... (${i + 1})`);
-            await new Promise(res => setTimeout(res, 1000));
-        }
-    }
-}
-
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 
 // Define HELIUS_API_KEY before using it in CONFIG
-
-if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TRADING_WALLET_PRIVATE_KEY) {
-    console.error("❌ Critical environment variables are missing. Please check TELEGRAM_BOT_TOKEN and TRADING_WALLET_PRIVATE_KEY.");
-    process.exit(1);
-}
-
-
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || 'db7b00c4-31e1-4ee9-91c9-116f0667cf4a';
 
 // ====== CONFIGURATION ======
@@ -226,11 +204,20 @@ async function monitorAllWallets() {
     for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
+
+        let pubkey;
+        // Vérification de la validité de l'adresse
+        try {
+            pubkey = new PublicKey(walletAddress);
+        } catch (e) {
+            console.error(`❌ Adresse invalide ignorée : ${walletAddress}`);
+            continue; // Passe à l’adresse suivante si l'adresse est invalide
+        }
         
         try {
             // Get recent signatures for this wallet
             const signatures = await connection.getSignaturesForAddress(
-                new PublicKey(walletAddress),
+                pubkey,
                 { limit: 30 }
             );
             
@@ -278,7 +265,8 @@ async function monitorAllWallets() {
             }
             
         } catch (error) {
-            console.error(`Error monitoring ${walletName}: ${error.message}`);
+            console.error(`Erreur lors de la récupération des signatures pour ${walletAddress} : ${error.message}`);
+            continue; // Passe à l’adresse suivante en cas d'erreur réseau ou RPC
         }
         
         // Add a small delay between wallets to prevent rate limiting
@@ -286,13 +274,6 @@ async function monitorAllWallets() {
     }
     
     // Clean up old signatures
-
-if (processedSignatures.size > 5000) {
-    const oldestEntries = Array.from(processedSignatures).slice(0, 1000);
-    oldestEntries.forEach(sig => processedSignatures.delete(sig));
-    console.log("🔄 Cleaned up old processed signatures.");
-}
-
     if (processedSignatures.size > 10000) {
         const sigArray = Array.from(processedSignatures);
         sigArray.slice(0, 5000).forEach(sig => processedSignatures.delete(sig));
@@ -574,12 +555,6 @@ async function checkPriceAlerts() {
     for (const [tokenMint, alertData] of Object.entries(priceAlerts)) {
         try {
             const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
             
             if (currentPrice === null) {
                 console.log(`⚠️ Could not get price for ${alertData.tokenInfo.symbol}`);
@@ -1156,12 +1131,6 @@ bot.on('callback_query', async (callbackQuery) => {
             // Get current price for reference
             await getSolPriceUSD();
             const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
             const currentPriceUSD = currentPrice ? currentPrice * solPriceUSD : 0;
             const tokenInfo = await getTokenInfo(tokenMint);
             
@@ -1201,12 +1170,6 @@ if (!currentPrice) {
             // Get current price for reference
             await getSolPriceUSD();
             const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
             const currentPriceUSD = currentPrice ? currentPrice * solPriceUSD : 0;
             const tokenInfo = await getTokenInfo(tokenMint);
             
@@ -1337,12 +1300,6 @@ if (!currentPrice) {
             try {
                 await getSolPriceUSD();
                 const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
                 
                 if (currentPrice) {
                     const currentPriceUSD = currentPrice * solPriceUSD;
@@ -1980,12 +1937,6 @@ async function updateTrailingStopLoss(tokenMint) {
     if (!position || position.totalBought <= position.totalSold) return;
     
     const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
     if (!currentPrice) return;
     
     const trailing = trailingStopLoss[tokenMint];
@@ -2032,12 +1983,6 @@ async function checkProfitTargets(tokenMint) {
     if (!position || position.totalBought <= position.totalSold) return;
     
     const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
     if (!currentPrice || !position.averageBuyPrice) return;
     
     const profitPercent = ((currentPrice - position.averageBuyPrice) / position.averageBuyPrice) * 100;
@@ -2102,12 +2047,6 @@ async function monitorPositions() {
             
             // Check emergency stop loss
             const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
             if (currentPrice && position.averageBuyPrice) {
                 const lossPercent = ((position.averageBuyPrice - currentPrice) / position.averageBuyPrice) * 100;
                 
@@ -2213,12 +2152,6 @@ async function calculateProfitLoss(tokenMint) {
     
     const currentBalance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
     const currentPrice = await getTokenPrice(tokenMint);
-
-if (!currentPrice) {
-    console.warn(`Unable to fetch price for token ${tokenMint}`);
-    continue;
-}
-
     
     if (!currentPrice) return null;
     
