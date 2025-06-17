@@ -186,10 +186,10 @@ async function monitorAllWallets() {
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
         
         try {
-            // Get ALL recent signatures for this wallet
+            // Get ALL recent signatures for this wallet (increased limit)
             const signatures = await connection.getSignaturesForAddress(
                 new PublicKey(walletAddress),
-                { limit: 100 }
+                { limit: 100 } // Increased from 30 to get more transactions
             );
             
             console.log(`📝 Found ${signatures.length} transactions for ${walletName}`);
@@ -198,9 +198,10 @@ async function monitorAllWallets() {
             let processedCount = 0;
             
             for (const sigInfo of signatures) {
-                // Skip already processed or pre-bot-start transactions
-                if (processedSignatures.has(sigInfo.signature) || 
-                    (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime)) {
+                if (processedSignatures.has(sigInfo.signature)) continue;
+                
+                // Skip transactions from before bot started
+                if (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime) {
                     processedSignatures.add(sigInfo.signature);
                     continue;
                 }
@@ -211,23 +212,23 @@ async function monitorAllWallets() {
                         maxSupportedTransactionVersion: 0
                     });
                     
-                    // Skip if transaction doesn't exist or failed
+                    // Skip if transaction is not found or failed
                     if (!tx || tx.meta?.err) {
                         processedSignatures.add(sigInfo.signature);
                         continue;
                     }
                     
-                    // Process valid transaction
+                    // Process ALL types of transactions
                     await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
                     processedCount++;
                     
                 } catch (txError) {
-                    console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
+                    console.error(`Error processing tx ${sigInfo.signature.slice(0,8)}...: ${txError.message}`);
                 }
             }
             
             if (processedCount > 0) {
-                console.log(`✅ Processed ${processedCount} valid transactions for ${walletName}`);
+                console.log(`✅ Processed ${processedCount} transactions for ${walletName}`);
             }
             
         } catch (error) {
@@ -526,7 +527,7 @@ async function handleTokenReceived(walletAddress, tokenMint, amount, signature, 
 📊 Amount: +${formatNumber(amount)}
 💧 Liquidity: ${formatNumber(analytics.liquidity)}
 👥 Holders: ${analytics.holders}
-🆔 Token: <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>
+🆔 Token: ${shortenAddress(tokenMint)}
 🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
     
     const keyboard = {
@@ -544,7 +545,7 @@ async function handleTokenReceived(walletAddress, tokenMint, amount, signature, 
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
                 { text: '💼 Balance', callback_data: `balance_${tokenMint}` },
-                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana?token=${tokenMint}` },
             ],
             [
                 { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` },
@@ -582,7 +583,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
 <code>${walletAddress}</code>
 🪙 Token: <b>${tokenInfo.symbol}</b> ${tokenInfo.name !== 'Unknown Token' ? `(${tokenInfo.name})` : ''}
 📊 Amount: -${formatNumber(amount)}
-🆔 Token: <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>
+🆔 Token: ${shortenAddress(tokenMint)}
 🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
     
     const keyboard = {
@@ -599,7 +600,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
             ],
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
-                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana?token=${tokenMint}` },
                 { text: '📊 P/L Report', callback_data: `pl_${tokenMint}` },
             ],
             [
