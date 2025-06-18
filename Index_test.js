@@ -269,18 +269,10 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
     const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
     const programInteractions = analyzeProgramInteractions(tx, walletAddress);
 
-    // 🔐 Ignore purely SOL transactions if no token was involved
-    if (tokenTransfers.length === 0) {
-        console.log(`⚠️ Ignored tx ${sigInfo.signature} — no token transfers`);
+    if (tokenTransfers.length === 0 && solTransfers.length === 0) {
+        console.log(`⚠️ Ignored tx ${sigInfo.signature} — no relevant activity`);
         return;
     }
-
-    const transfer = tokenTransfers[0]; // assume 1 per tx
-    const tokenInfo = await getTokenInfo(transfer.mint);
-    const analytics = await getTokenAnalytics(transfer.mint);
-    const shortMint = shortenAddress(transfer.mint);
-    const direction = transfer.direction === 'in' ? '+' : '-';
-    const emoji = transfer.direction === 'in' ? '📥' : '📤';
 
     let message =
         `📋 TRANSACTION DETECTED\n\n` +
@@ -299,15 +291,25 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         message += `\n`;
     }
 
-    message +=
-        `${emoji} Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
-        `📊 Amount: ${direction}${formatNumber(transfer.amount)}\n` +
-        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
-        `👥 Holders: ${analytics.holders}\n` +
-        `🆔 Token: ${transfer.mint} (https://dexscreener.com/solana/${transfer.mint})\n`;
+    if (tokenTransfers.length > 0) {
+        for (const transfer of tokenTransfers) {
+            const tokenInfo = await getTokenInfo(transfer.mint);
+            const analytics = await getTokenAnalytics(transfer.mint);
+            const shortMint = shortenAddress(transfer.mint);
+            const direction = transfer.direction === 'in' ? '+' : '-';
+            const emoji = transfer.direction === 'in' ? '📥' : '📤';
+
+            message +=
+                `${emoji} Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+                `📊 Amount: ${direction}${formatNumber(transfer.amount)}\n` +
+                `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+                `👥 Holders: ${analytics.holders}\n` +
+                `🆔 Token: ${transfer.mint} (https://dexscreener.com/solana/${transfer.mint})\n\n`;
+        }
+    }
 
     if (programInteractions.length > 0) {
-        message += `\n🛠 Program Interactions:\n`;
+        message += `🛠 Program Interactions:\n`;
         const uniquePrograms = [...new Set(programInteractions.map(p => p.name))];
         uniquePrograms.forEach(p => {
             message += `• ${p}\n`;
@@ -317,19 +319,18 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
     const keyboard = {
         inline_keyboard: [
             [
-                { text: `💰 Buy ${tokenInfo.symbol}`, callback_data: `buy_0.01_${transfer.mint}` },
-                { text: '📊 Price', callback_data: `price_${transfer.mint}` },
-                { text: '📈 Chart', url: `https://dexscreener.com/solana/${transfer.mint}` }
+                { text: '📈 Dexscreener', url: `https://dexscreener.com/solana/${tokenTransfers[0]?.mint}` },
+                { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenTransfers[0]?.mint}` }
             ],
             [
                 { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` },
-                { text: '🚫 Blacklist', callback_data: `blacklist_${transfer.mint}` }
+                { text: '🚫 Blacklist', callback_data: `blacklist_${tokenTransfers[0]?.mint}` }
             ]
         ]
     };
 
     await sendTelegramMessage(message, { reply_markup: keyboard });
-    console.log(`✅ Final TX Message sent for ${tokenInfo.symbol} from ${walletName}`);
+    console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
 
 
@@ -399,50 +400,69 @@ function analyzeSolTransfers(tx, walletAddress) {
 // Analyze token transfers in transaction
 function analyzeTokenTransfers(tx, walletAddress) {
     const transfers = [];
-    
     if (!tx.meta) return transfers;
-    
+
+    const tokenChanges = {};
+
+    // Process outer token balances
     const preBalances = tx.meta.preTokenBalances || [];
     const postBalances = tx.meta.postTokenBalances || [];
-    
-    // Create maps for easier lookup
-    const preMap = new Map();
-    const postMap = new Map();
-    
-    preBalances.forEach(balance => {
+
+    for (const balance of preBalances) {
         if (balance.owner === walletAddress) {
-            preMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+            const mint = balance.mint;
+            tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
+            tokenChanges[mint].pre = balance.uiTokenAmount.uiAmount || 0;
         }
-    });
-    
-    postBalances.forEach(balance => {
+    }
+
+    for (const balance of postBalances) {
         if (balance.owner === walletAddress) {
-            postMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+            const mint = balance.mint;
+            tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
+            tokenChanges[mint].post = balance.uiTokenAmount.uiAmount || 0;
         }
-    });
-    
-    // Check all mints that appear in either pre or post
-    const allMints = new Set([...preMap.keys(), ...postMap.keys()]);
-    
-    for (const mint of allMints) {
-        const preAmount = preMap.get(mint) || 0;
-        const postAmount = postMap.get(mint) || 0;
-        const change = postAmount - preAmount;
-        
+    }
+
+    // Additional: look into inner instructions (helps when outer balances are missing)
+    const inner = tx.meta.innerInstructions || [];
+    for (const innerIx of inner) {
+        for (const inst of innerIx.instructions || []) {
+            try {
+                if (inst.parsed?.type === 'transfer' && inst.parsed?.info?.mint) {
+                    const mint = inst.parsed.info.mint;
+                    const owner = inst.parsed.info.owner;
+                    if (owner === walletAddress) {
+                        const amount = parseFloat(inst.parsed.info.amount) / Math.pow(10, inst.parsed.info.decimals || 9);
+                        tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
+                        tokenChanges[mint].post += amount;
+                    }
+                }
+            } catch (e) {
+                // silent fail, inner parsing is messy
+            }
+        }
+    }
+
+    for (const mint in tokenChanges) {
+        const pre = tokenChanges[mint].pre || 0;
+        const post = tokenChanges[mint].post || 0;
+        const change = post - pre;
         if (Math.abs(change) > 0.000001) {
             transfers.push({
                 mint: mint,
                 direction: change > 0 ? 'in' : 'out',
                 amount: Math.abs(change),
-                isNewToken: preAmount === 0 && postAmount > 0,
-                isFullSell: preAmount > 0 && postAmount === 0,
+                isNewToken: pre === 0 && post > 0,
+                isFullSell: pre > 0 && post === 0,
                 type: 'TOKEN'
             });
         }
     }
-    
+
     return transfers;
 }
+
 
 // Analyze program interactions
 function analyzeProgramInteractions(tx, walletAddress) {
