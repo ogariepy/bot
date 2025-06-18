@@ -258,107 +258,80 @@ async function monitorAllWallets() {
 // Enhanced transaction analyzer that captures ALL transaction types
 async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
     if (processedSignatures.has(sigInfo.signature)) return;
-    
+    processedSignatures.add(sigInfo.signature);
+
     const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    const walletPubkey = new PublicKey(walletAddress);
-    
-    console.log(`\n🔍 Analyzing tx ${sigInfo.signature.slice(0, 8)}... for ${walletName}`);
-    
-    // Transaction details
     const txTime = sigInfo.blockTime ? new Date(sigInfo.blockTime * 1000).toLocaleString() : 'Unknown time';
     const success = !tx.meta?.err;
-    const fee = (tx.meta?.fee || 0) / 1e9; // Convert lamports to SOL
-    
-    // Analyze different aspects of the transaction
+    const fee = (tx.meta?.fee || 0) / 1e9;
+
     const solTransfers = analyzeSolTransfers(tx, walletAddress);
     const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
     const programInteractions = analyzeProgramInteractions(tx, walletAddress);
-    
-    // Build comprehensive notification
-    let message = `📋 <b>TRANSACTION DETECTED</b>\n\n`;
-    message += `👛 Wallet: <b>${walletName}</b>\n`;
-    message += `<code>${walletAddress}</code>\n`;
-    message += `⏰ Time: ${txTime}\n`;
-    message += `✅ Status: ${success ? 'Success' : 'Failed'}\n`;
-    message += `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
-    
-    // Add SOL transfers
+
+    // 🔐 Ignore purely SOL transactions if no token was involved
+    if (tokenTransfers.length === 0) {
+        console.log(`⚠️ Ignored tx ${sigInfo.signature} — no token transfers`);
+        return;
+    }
+
+    const transfer = tokenTransfers[0]; // assume 1 per tx
+    const tokenInfo = await getTokenInfo(transfer.mint);
+    const analytics = await getTokenAnalytics(transfer.mint);
+    const shortMint = shortenAddress(transfer.mint);
+    const direction = transfer.direction === 'in' ? '+' : '-';
+    const emoji = transfer.direction === 'in' ? '📥' : '📤';
+
+    let message =
+        `📋 TRANSACTION DETECTED\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `⏰ Time: ${txTime}\n` +
+        `✅ Status: ${success ? 'Success' : 'Failed'}\n` +
+        `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
+
     if (solTransfers.length > 0) {
-        message += `<b>💰 SOL Transfers:</b>\n`;
-        for (const transfer of solTransfers) {
-            const emoji = transfer.direction === 'in' ? '📥' : '📤';
-            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${transfer.amount.toFixed(4)} SOL ${transfer.direction === 'in' ? 'from' : 'to'} ${shortenAddress(transfer.counterparty)}\n`;
+        message += `💰 SOL Transfers:\n`;
+        for (const sol of solTransfers) {
+            const sEmoji = sol.direction === 'in' ? '📥' : '📤';
+            message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sent'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
         }
-        message += '\n';
+        message += `\n`;
     }
-    
-    // Add token transfers
-    if (tokenTransfers.length > 0) {
-        message += `<b>🪙 Token Transfers:</b>\n`;
-        for (const transfer of tokenTransfers) {
-            const emoji = transfer.direction === 'in' ? '📥' : '📤';
-            const tokenInfo = await getTokenInfo(transfer.mint);
-            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${formatNumber(transfer.amount)} ${tokenInfo.symbol}\n`;
-            if (transfer.direction === 'in' && transfer.isNewToken) {
-                message += `   🆕 NEW TOKEN ACQUIRED!\n`;
-            }
-        }
-        message += '\n';
-    }
-    
-    // Add program interactions
+
+    message +=
+        `${emoji} Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+        `📊 Amount: ${direction}${formatNumber(transfer.amount)}\n` +
+        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+        `👥 Holders: ${analytics.holders}\n` +
+        `🆔 Token: ${transfer.mint} (https://dexscreener.com/solana/${transfer.mint})\n`;
+
     if (programInteractions.length > 0) {
-        message += `<b>🔧 Program Interactions:</b>\n`;
+        message += `\n🛠 Program Interactions:\n`;
         const uniquePrograms = [...new Set(programInteractions.map(p => p.name))];
-        uniquePrograms.forEach(program => {
-            message += `• ${program}\n`;
+        uniquePrograms.forEach(p => {
+            message += `• ${p}\n`;
         });
-        message += '\n';
     }
-    
-    // Transaction signature
-    message += `🔗 <a href="https://solscan.io/tx/${sigInfo.signature}">View on Solscan</a>`;
-    
-    // Create inline keyboard with relevant actions
+
     const keyboard = {
-        inline_keyboard: []
+        inline_keyboard: [
+            [
+                { text: `💰 Buy ${tokenInfo.symbol}`, callback_data: `buy_0.01_${transfer.mint}` },
+                { text: '📊 Price', callback_data: `price_${transfer.mint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana/${transfer.mint}` }
+            ],
+            [
+                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` },
+                { text: '🚫 Blacklist', callback_data: `blacklist_${transfer.mint}` }
+            ]
+        ]
     };
-    
-    // Add buy/sell buttons for token transfers
-    if (tokenTransfers.length > 0) {
-        for (const transfer of tokenTransfers) {
-            if (transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
-                const tokenInfo = await getTokenInfo(transfer.mint);
-                keyboard.inline_keyboard.push([
-                    { text: `💰 Buy ${tokenInfo.symbol}`, callback_data: `buy_0.01_${transfer.mint}` },
-                    { text: `📊 Price ${tokenInfo.symbol}`, callback_data: `price_${transfer.mint}` },
-                    { text: `📈 Chart`, url: `https://dexscreener.com/solana/${transfer.mint}` }
-                ]);
-            }
-        }
-    }
-    
-    // Add general transaction buttons
-    keyboard.inline_keyboard.push([
-        { text: '🔍 Solscan', url: `https://solscan.io/tx/${sigInfo.signature}` },
-        { text: '👛 View Wallet', url: `https://solscan.io/account/${walletAddress}` }
-    ]);
-    
-    // Send notification
+
     await sendTelegramMessage(message, { reply_markup: keyboard });
-    
-    // Handle copytrading for token buys
-    for (const transfer of tokenTransfers) {
-        if (transfer.direction === 'in' && transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
-            await handleCopytrade(walletAddress, transfer.mint, true);
-        }
-    }
-    
-    // Mark as processed
-    processedSignatures.add(sigInfo.signature);
-    
-    console.log(`✅ Transaction ${sigInfo.signature.slice(0, 8)}... fully analyzed`);
+    console.log(`✅ Final TX Message sent for ${tokenInfo.symbol} from ${walletName}`);
 }
+
 
 // Analyze SOL transfers in transaction
 function analyzeSolTransfers(tx, walletAddress) {
@@ -514,115 +487,105 @@ function analyzeProgramInteractions(tx, walletAddress) {
 // ====== NOTIFICATION HANDLERS ======
 async function handleTokenReceived(walletAddress, tokenMint, amount, signature, isNewToken) {
     const tokenInfo = await getTokenInfo(tokenMint);
-    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    
-    const emoji = isNewToken ? '🟢' : '🔵';
-    const action = isNewToken ? 'NEW TOKEN RECEIVED' : 'TOKEN RECEIVED';
-    
-    // Get token analytics for display
     const analytics = await getTokenAnalytics(tokenMint);
-    
-    // Format token address for display
-    const shortenedTokenMint = shortenAddress(tokenMint);
-    
-    const message = `${emoji} <b>${action}</b>\n\n` +
-        `👛 Wallet: <b>${walletName}</b>\n` +
-        `<code>${walletAddress}</code>\n` +
-        `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const shortMint = shortenAddress(tokenMint);
+
+    const message =
+        `🟢 TOKEN RECEIVED\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `🪙 Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
         `📊 Amount: +${formatNumber(amount)}\n` +
         `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
         `👥 Holders: ${analytics.holders}\n` +
-        `🆔 ${shortenedTokenMint}`;
-    
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
+
     const keyboard = {
         inline_keyboard: [
             [
                 { text: '💰 Buy 0.01 SOL', callback_data: `buy_0.01_${tokenMint}` },
-                { text: '💰 Buy 0.02 SOL', callback_data: `buy_0.02_${tokenMint}` },
-                { text: '💰 Buy 0.03 SOL', callback_data: `buy_0.03_${tokenMint}` },
-            ],
-            [
-                { text: '💰 Buy 0.04 SOL', callback_data: `buy_0.04_${tokenMint}` },
                 { text: '💰 Buy 0.05 SOL', callback_data: `buy_0.05_${tokenMint}` },
-                { text: '💰 Buy 1 SOL', callback_data: `buy_1_${tokenMint}` },
+                { text: '💰 Buy 0.1 SOL', callback_data: `buy_0.1_${tokenMint}` }
             ],
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
-                { text: '💼 Balance', callback_data: `balance_${tokenMint}` },
                 { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '💼 Balance', callback_data: `balance_${tokenMint}` }
             ],
             [
                 { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` },
-                { text: '🎯 Set Take Profit', callback_data: `set_takeprofit_${tokenMint}` },
+                { text: '🎯 Set Take Profit', callback_data: `set_takeprofit_${tokenMint}` }
             ],
             [
-                { text: '🔗 Solscan', url: `https://solscan.io/tx/${signature}` },
                 { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` },
-            ],
-            [
-                { text: '📊 P/L Report', callback_data: `pl_${tokenMint}` },
-                { text: '🔄 Toggle Copytrade', callback_data: `copytrade_${walletAddress}` },
+                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` }
             ],
             [
                 { text: '🚫 Blacklist Token', callback_data: `blacklist_${tokenMint}` },
-                { text: '📊 Token Analytics', callback_data: `analytics_${tokenMint}` },
+                { text: '📊 Token Analytics', callback_data: `analytics_${tokenMint}` }
             ]
         ]
     };
-    
+
     await sendTelegramMessage(message, { reply_markup: keyboard });
-    console.log(`${emoji} ${action} detected: ${tokenInfo.symbol} by ${walletName}`);
+    console.log(`🟢 Token received: ${tokenInfo.symbol} (${tokenMint}) by ${walletName}`);
 }
 
 async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFullSell) {
     const tokenInfo = await getTokenInfo(tokenMint);
+    const analytics = await getTokenAnalytics(tokenMint);
     const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    
+    const shortMint = shortenAddress(tokenMint);
+
     const emoji = isFullSell ? '🔴' : '🟠';
-    const action = isFullSell ? 'FULL SELL' : 'TOKEN SOLD';
-    
-    // Format token address for display
-    const shortenedTokenMint = shortenAddress(tokenMint);
-    
-    const message = `${emoji} <b>${action}</b>\n\n` +
-        `👛 Wallet: <b>${walletName}</b>\n` +
-        `<code>${walletAddress}</code>\n` +
-        `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
-        `📊 Amount: -${formatNumber(amount)}\n` +
-        `🆔 ${shortenedTokenMint}`;
-    
+    const statusText = isFullSell ? 'FULL SELL' : 'TOKEN SOLD';
+
+    const message =
+        `${emoji} ${statusText}\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `🪙 Token: ${shortMint}\n` +
+        `📉 Amount: -${formatNumber(amount)}\n` +
+        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+        `👥 Holders: ${analytics.holders}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
+
     const keyboard = {
         inline_keyboard: [
             [
                 { text: '💰 Buy 0.01 SOL', callback_data: `buy_0.01_${tokenMint}` },
                 { text: '💰 Buy 0.05 SOL', callback_data: `buy_0.05_${tokenMint}` },
-                { text: '💰 Buy 0.1 SOL', callback_data: `buy_0.1_${tokenMint}` },
-            ], 
+                { text: '💰 Buy 0.1 SOL', callback_data: `buy_0.1_${tokenMint}` }
+            ],
             [
                 { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
                 { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
-                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` },
+                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
             ],
             [
                 { text: '📊 Price', callback_data: `price_${tokenMint}` },
                 { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
-                { text: '📊 P/L Report', callback_data: `pl_${tokenMint}` },
+                { text: '💼 Balance', callback_data: `balance_${tokenMint}` }
             ],
             [
                 { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` },
-                { text: '🎯 Set Take Profit', callback_data: `set_takeprofit_${tokenMint}` },
+                { text: '🎯 Set Take Profit', callback_data: `set_takeprofit_${tokenMint}` }
             ],
             [
-                { text: '🔗 Solscan', url: `https://solscan.io/tx/${signature}` },
                 { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` },
+                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` }
+            ],
+            [
+                { text: '🚫 Blacklist Token', callback_data: `blacklist_${tokenMint}` },
+                { text: '📊 Token Analytics', callback_data: `analytics_${tokenMint}` }
             ]
         ]
     };
-    
-    await sendTelegramMessage(message, { reply_markup: keyboard });
-    console.log(`${emoji} ${action} detected: ${tokenInfo.symbol} by ${walletName}`);
-}
 
+    await sendTelegramMessage(message, { reply_markup: keyboard });
+    console.log(`${emoji} ${statusText}: ${tokenInfo.symbol} (${tokenMint}) by ${walletName}`);
+}
 
 // ====== PRICE FUNCTIONS ======
 async function getSolPriceUSD() {
@@ -756,101 +719,84 @@ async function checkPriceAlerts() {
 async function sendPriceAlert(tokenMint, tokenInfo, currentPrice, currentPriceUSD, targetPrice, direction) {
     const emoji = direction === 'above' ? '🚀' : '📉';
     const action = direction === 'above' ? 'ABOVE' : 'BELOW';
-    
-    const message = `${emoji} <b>PRICE ALERT - ${action} TARGET</b>
 
-🪙 Token: <b>${tokenInfo.symbol}</b> ${tokenInfo.name !== 'Unknown Token' ? `(${tokenInfo.name})` : ''}
+    const message =
+        `${emoji} PRICE ALERT - ${action} TARGET\n\n` +
+        `🪙 Token: ${tokenInfo.symbol} (${tokenInfo.name})\n` +
+        `💰 Current Price:\n` +
+        `• SOL: ${currentPrice.toFixed(8)}\n` +
+        `• USD: ${currentPriceUSD.toFixed(6)}\n\n` +
+        `🎯 Target: ${targetPrice.toFixed(6)}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
 
-💰 <b>Current Price:</b>
-• SOL: ${currentPrice.toFixed(8)}
-• USD: ${currentPriceUSD.toFixed(6)}
-
-🎯 <b>Target:</b> ${targetPrice.toFixed(6)}
-📊 ${direction === 'above' ? 'Increased' : 'Decreased'} ${Math.abs(((currentPriceUSD - targetPrice) / targetPrice) * 100).toFixed(2)}%
-
-🆔 Token: <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
-    
     const keyboard = {
         inline_keyboard: [
             [
                 { text: '💰 Buy 0.1 SOL', callback_data: `buy_0.1_${tokenMint}` },
-                { text: '💰 Buy 1 SOL', callback_data: `buy_1_${tokenMint}` },
+                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
             ],
             [
-                { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
-                { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
-                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` },
-            ],
-            [
-                { text: '📊 Current Price', callback_data: `price_${tokenMint}` },
                 { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📊 Price', callback_data: `price_${tokenMint}` }
             ]
         ]
     };
-    
+
     await sendTelegramMessage(message, { reply_markup: keyboard });
-    console.log(`${emoji} Price alert triggered for ${tokenInfo.symbol}: ${action} ${targetPrice}`);
 }
 
 async function sendStopLossAlert(tokenMint, tokenInfo, currentPrice, currentPriceUSD, stopLossPrice) {
     const tokenBalance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-    
-    const message = `🛑 <b>STOP LOSS TRIGGERED!</b>
 
-🪙 Token: <b>${tokenInfo.symbol}</b>
-💰 Current Price: ${currentPriceUSD.toFixed(6)} (${currentPrice.toFixed(8)} SOL)
-🛑 Stop Loss: ${stopLossPrice.toFixed(6)}
-📉 Loss: -${(((stopLossPrice - currentPriceUSD) / stopLossPrice) * 100).toFixed(2)}%
-💼 Balance: ${formatNumber(tokenBalance)} ${tokenInfo.symbol}
+    const message =
+        `🛑 STOP LOSS TRIGGERED\n\n` +
+        `🪙 Token: ${tokenInfo.symbol}\n` +
+        `💰 Current Price: ${currentPriceUSD.toFixed(6)} (${currentPrice.toFixed(8)} SOL)\n` +
+        `🛑 Stop Loss: ${stopLossPrice.toFixed(6)}\n` +
+        `📉 Balance: ${formatNumber(tokenBalance)} ${tokenInfo.symbol}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
 
-⚠️ <b>Consider selling to minimize losses!</b>`;
-    
     const keyboard = {
         inline_keyboard: [
             [
                 { text: '🚨 SELL 50%', callback_data: `sell_50_${tokenMint}` },
-                { text: '🚨 SELL 100%', callback_data: `sell_100_${tokenMint}` },
+                { text: '🚨 SELL 100%', callback_data: `sell_100_${tokenMint}` }
             ],
             [
-                { text: '📊 Current Price', callback_data: `price_${tokenMint}` },
                 { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📊 Price', callback_data: `price_${tokenMint}` }
             ]
         ]
     };
-    
+
     await sendTelegramMessage(message, { reply_markup: keyboard });
 }
 
 async function sendTakeProfitAlert(tokenMint, tokenInfo, currentPrice, currentPriceUSD, takeProfitPrice) {
     const tokenBalance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-    
-    const message = `🎯 <b>TAKE PROFIT REACHED!</b>
 
-🪙 Token: <b>${tokenInfo.symbol}</b>
-💰 Current Price: ${currentPriceUSD.toFixed(6)} (${currentPrice.toFixed(8)} SOL)
-🎯 Take Profit: ${takeProfitPrice.toFixed(6)}
-📈 Profit: +${(((currentPriceUSD - takeProfitPrice) / takeProfitPrice) * 100).toFixed(2)}%
-💼 Balance: ${formatNumber(tokenBalance)} ${tokenInfo.symbol}
+    const message =
+        `🎯 TAKE PROFIT REACHED\n\n` +
+        `🪙 Token: ${tokenInfo.symbol}\n` +
+        `💰 Current Price: ${currentPriceUSD.toFixed(6)} (${currentPrice.toFixed(8)} SOL)\n` +
+        `🎯 Target: ${takeProfitPrice.toFixed(6)}\n` +
+        `📈 Balance: ${formatNumber(tokenBalance)} ${tokenInfo.symbol}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
 
-💡 <b>Consider taking profits!</b>`;
-    
     const keyboard = {
         inline_keyboard: [
             [
                 { text: '💰 SELL 25%', callback_data: `sell_25_${tokenMint}` },
                 { text: '💰 SELL 50%', callback_data: `sell_50_${tokenMint}` },
+                { text: '💰 SELL 100%', callback_data: `sell_100_${tokenMint}` }
             ],
             [
-                { text: '💰 SELL 75%', callback_data: `sell_75_${tokenMint}` },
-                { text: '💰 SELL 100%', callback_data: `sell_100_${tokenMint}` },
-            ],
-            [
-                { text: '📊 Current Price', callback_data: `price_${tokenMint}` },
                 { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📊 Price', callback_data: `price_${tokenMint}` }
             ]
         ]
     };
-    
+
     await sendTelegramMessage(message, { reply_markup: keyboard });
 }
 
@@ -1002,75 +948,73 @@ async function executeSwap(quoteResponse) {
     }
 }
 
-async function buyToken(tokenMint, solAmount) {
-    try {
-        console.log(`🛒 Attempting to buy token ${tokenMint} with ${solAmount} SOL`);
-        
-        const amountInLamports = Math.floor(solAmount * 1e9);
-        
-        const quote = await getJupiterQuote(
-            CONFIG.WSOL_ADDRESS,
-            tokenMint,
-            amountInLamports,
-            CONFIG.SLIPPAGE_BPS
-        );
-        
-        console.log(`💰 Quote received: ${quote.outAmount} tokens for ${solAmount} SOL`);
-        
-        const txid = await executeSwap(quote);
-        
-        console.log(`✅ Buy transaction successful: ${txid}`);
-        
-        // Record the trade
-        const tokenInfo = await getTokenInfo(tokenMint);
-        const tokenAmount = quote.outAmount / Math.pow(10, tokenInfo.decimals);
-        recordTrade(tokenMint, 'buy', tokenAmount, solAmount, txid, tokenInfo);
-        
-        return { success: true, txid, amount: quote.outAmount };
-        
-    } catch (error) {
-        console.error('❌ Buy transaction failed:', error);
-        return { success: false, error: error.message };
-    }
+async function buyToken(walletAddress, tokenMint, solAmount) {
+    const tokenInfo = await getTokenInfo(tokenMint);
+    const analytics = await getTokenAnalytics(tokenMint);
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const shortMint = shortenAddress(tokenMint);
+
+    const message =
+        `✅ BUY ORDER EXECUTED\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `💰 Bought: ${solAmount} SOL worth\n` +
+        `🪙 Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+        `👥 Holders: ${analytics.holders}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
+                { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
+                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
+            ],
+            [
+                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                { text: '📊 Price', callback_data: `price_${tokenMint}` },
+                { text: '💼 Balance', callback_data: `balance_${tokenMint}` }
+            ]
+        ]
+    };
+
+    await sendTelegramMessage(message, { reply_markup: keyboard });
+    console.log(`✅ Bought ${tokenInfo.symbol} with ${solAmount} SOL from ${walletName}`);
 }
 
-async function sellToken(tokenMint, amount = null, percentage = 100) {
-    try {
-        const tokenBalance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-        
-        if (tokenBalance === 0) {
-            return { success: false, error: 'No tokens to sell' };
-        }
-        
-        const amountToSell = amount || (tokenBalance * percentage / 100);
-        const tokenInfo = await getTokenInfo(tokenMint);
-        const amountInSmallestUnit = Math.floor(amountToSell * Math.pow(10, tokenInfo.decimals));
-        
-        console.log(`🛒 Attempting to sell ${amountToSell} ${tokenInfo.symbol} (${percentage}%)`);
-        
-        const quote = await getJupiterQuote(
-            tokenMint,
-            CONFIG.WSOL_ADDRESS,
-            amountInSmallestUnit,
-            CONFIG.SLIPPAGE_BPS
-        );
-        
-        const solReceived = quote.outAmount / 1e9;
-        console.log(`💰 Quote received: ${solReceived} SOL for ${amountToSell} tokens`);
-        
-        const txid = await executeSwap(quote);
-        
-        console.log(`✅ Sell transaction successful: ${txid}`);
-        
-        // Record the trade
-        recordTrade(tokenMint, 'sell', amountToSell, solReceived, txid);
-        
-        return { success: true, txid, tokensSold: amountToSell, solReceived };
-        
-    } catch (error) {
-        console.error('❌ Sell transaction failed:', error);
-        return { success: false, error: error.message };
-    }
+async function sellToken(walletAddress, tokenMint, tokenAmount) {
+    const tokenInfo = await getTokenInfo(tokenMint);
+    const analytics = await getTokenAnalytics(tokenMint);
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const shortMint = shortenAddress(tokenMint);
+
+    const message =
+        `🚨 SELL ORDER EXECUTED\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `📉 Sold: ${formatNumber(tokenAmount)} ${tokenInfo.symbol}\n` +
+        `🪙 Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
+        `👥 Holders: ${analytics.holders}\n` +
+        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: '💰 Buy 0.01 SOL', callback_data: `buy_0.01_${tokenMint}` },
+                { text: '📊 Price', callback_data: `price_${tokenMint}` },
+                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` }
+            ],
+            [
+                { text: '💼 Balance', callback_data: `balance_${tokenMint}` },
+                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` }
+            ]
+        ]
+    };
+
+    await sendTelegramMessage(message, { reply_markup: keyboard });
+    console.log(`🚨 Sold ${tokenAmount} ${tokenInfo.symbol} from ${walletName}`);
 }
 
 function canTrade(userId, amount) {
@@ -2318,16 +2262,11 @@ function formatNumber(num) {
 }
 
 async function sendTelegramMessage(message, options = {}) {
-    try {
-        await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
-            parse_mode: 'HTML',
-            disable_web_page_preview: true,
-            ...options
-        });
-        console.log('✅ Telegram message sent');
-    } catch (error) {
-        console.error('❌ Failed to send Telegram message:', error.message);
-    }
+    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...options
+    });
 }
 
 // ====== TOKEN INFO FUNCTIONS ======
@@ -2371,7 +2310,7 @@ async function getTokenInfo(tokenAddress) {
             if (metadataResponse.data && metadataResponse.data.length > 0) {
                 const metadata = metadataResponse.data[0];
                 return {
-                    symbol: metadata.symbol || metadata.onChainMetadata?.symbol || shortenAddress(tokenAddress),
+                    symbol: metadata.symbol || metadata.onChainMetadata?.symbol || 'Unknown',
                     name: metadata.name || metadata.onChainMetadata?.name || 'Unknown Token',
                     decimals: metadata.decimals || 9
                 };
@@ -2406,7 +2345,7 @@ async function handleCopytrade(walletAddress, tokenMint, isBuying) {
     
     // Create unique identifier for this trade
     const tradeId = `${walletAddress}_${tokenMint}_${isBuying ? 'buy' : 'sell'}_${Date.now()}`;
-    
+     
     // Check if we've already processed this copytrade
     if (processedCopytrades.has(tradeId)) return;
     processedCopytrades.add(tradeId);
