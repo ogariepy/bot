@@ -25,7 +25,7 @@ const CONFIG = {
     HELIUS_WS_URL: `wss://rpc.helius.xyz/?api-key=${HELIUS_API_KEY}`,
     
     // Telegram configuration
-    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '7888155934:AAG29LYnSYxDBKGsKYAYYnLaGB1hrY4wCfs',
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '8005459179:AAGdvlzrUa-e_0nV-hSvvQBimDZePCLQTGU',
     TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || '5782411264',
     
     // Trading wallet configuration
@@ -175,27 +175,47 @@ function initializeTrading() {
     }
 }
 
-// ====== ENHANCED MONITORING FUNCTION ======
+// ====== MAIN MONITORING FUNCTION ======
 async function monitorAllWallets() {
     if (!isMonitoring) return;
     
     console.log(`\n🔄 Checking all wallets at ${new Date().toLocaleTimeString()}...`);
+    
+    // Check daily loss limit
+    if (dailyStats.loss > 0 && dailyStats.profit > 0) {
+        const dailyPL = dailyStats.profit - dailyStats.loss;
+        const dailyPLPercent = (dailyPL / dailyStats.startBalance) * 100;
+        
+        if (dailyPLPercent < -RISK_MANAGEMENT.maxDailyLoss * 100) {
+            console.log(`🛑 Daily loss limit reached: ${dailyPLPercent.toFixed(2)}%`);
+            tradingPaused = true;
+            await sendTelegramMessage(
+                `🛑 <b>TRADING PAUSED - DAILY LOSS LIMIT</b>\n\n` +
+                `Daily P/L: ${dailyPL.toFixed(4)} SOL (${dailyPLPercent.toFixed(2)}%)\n` +
+                `Limit: -${RISK_MANAGEMENT.maxDailyLoss * 100}%\n\n` +
+                `Trading will resume tomorrow.`
+            );
+            return;
+        }
+    }
     
     for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
         
         try {
-            // Get ALL recent signatures for this wallet (increased limit)
+            // Get recent signatures for this wallet
             const signatures = await connection.getSignaturesForAddress(
                 new PublicKey(walletAddress),
-                { limit: 100 } // Increased from 30 to get more transactions
+                { limit: 30 }
             );
             
             console.log(`📝 Found ${signatures.length} recent transactions for ${walletName}`);
             
             // Process each signature
             let processedCount = 0;
+            let receivedCount = 0;
+            let sentCount = 0;
             
             for (const sigInfo of signatures) {
                 if (processedSignatures.has(sigInfo.signature)) continue;
@@ -207,15 +227,21 @@ async function monitorAllWallets() {
                 }
                 
                 try {
-                    // Get full transaction details
+                    // Get parsed transaction
                     const tx = await connection.getParsedTransaction(sigInfo.signature, {
                         maxSupportedTransactionVersion: 0
                     });
                     
-                    if (!tx) continue;
+                    if (!tx || !tx.meta || tx.meta.err) continue;
                     
-                    // Process ALL types of transactions
-                    await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
+                    // Count transaction types before processing
+                    const result = await analyzeTransaction(walletAddress, tx, sigInfo.signature);
+                    if (result && result.types) {
+                        result.types.forEach(type => {
+                            if (type === 'received') receivedCount++;
+                            else if (type === 'sent') sentCount++;
+                        });
+                    }
                     processedCount++;
                     
                 } catch (txError) {
@@ -224,7 +250,7 @@ async function monitorAllWallets() {
             }
             
             if (processedCount > 0) {
-                console.log(`✅ Processed ${processedCount} transactions for ${walletName}`);
+                console.log(`✅ Processed ${processedCount} transactions (${receivedCount} receives, ${sentCount} sends)`);
             }
             
         } catch (error) {
@@ -248,260 +274,93 @@ async function monitorAllWallets() {
     setTimeout(() => monitorAllWallets(), CONFIG.POLLING_INTERVAL_MS);
 }
 
-// Enhanced transaction analyzer that captures ALL transaction types
-async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
-    if (processedSignatures.has(sigInfo.signature)) return;
-    
-    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    const walletPubkey = new PublicKey(walletAddress);
-    
-    console.log(`\n🔍 Analyzing tx ${sigInfo.signature.slice(0, 8)}... for ${walletName}`);
-    
-    // Transaction details
-    const txTime = sigInfo.blockTime ? new Date(sigInfo.blockTime * 1000).toLocaleString() : 'Unknown time';
-    const success = !tx.meta?.err;
-    const fee = (tx.meta?.fee || 0) / 1e9; // Convert lamports to SOL
-    
-    // Analyze different aspects of the transaction
-    const solTransfers = analyzeSolTransfers(tx, walletAddress);
-    const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
-    const programInteractions = analyzeProgramInteractions(tx, walletAddress);
-    
-    // Build comprehensive notification
-    let message = `📋 <b>TRANSACTION DETECTED</b>\n\n`;
-    message += `👛 Wallet: <b>${walletName}</b>\n`;
-    message += `<code>${walletAddress}</code>\n`;
-    message += `⏰ Time: ${txTime}\n`;
-    message += `✅ Status: ${success ? 'Success' : 'Failed'}\n`;
-    message += `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
-    
-    // Add SOL transfers
-    if (solTransfers.length > 0) {
-        message += `<b>💰 SOL Transfers:</b>\n`;
-        for (const transfer of solTransfers) {
-            const emoji = transfer.direction === 'in' ? '📥' : '📤';
-            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${transfer.amount.toFixed(4)} SOL ${transfer.direction === 'in' ? 'from' : 'to'} ${shortenAddress(transfer.counterparty)}\n`;
-        }
-        message += '\n';
-    }
-    
-    // Add token transfers
-    if (tokenTransfers.length > 0) {
-        message += `<b>🪙 Token Transfers:</b>\n`;
-        for (const transfer of tokenTransfers) {
-            const emoji = transfer.direction === 'in' ? '📥' : '📤';
-            const tokenInfo = await getTokenInfo(transfer.mint);
-            message += `${emoji} ${transfer.direction === 'in' ? 'Received' : 'Sent'} ${formatNumber(transfer.amount)} ${tokenInfo.symbol}\n`;
-            if (transfer.direction === 'in' && transfer.isNewToken) {
-                message += `   🆕 NEW TOKEN ACQUIRED!\n`;
-            }
-        }
-        message += '\n';
-    }
-    
-    // Add program interactions
-    if (programInteractions.length > 0) {
-        message += `<b>🔧 Program Interactions:</b>\n`;
-        const uniquePrograms = [...new Set(programInteractions.map(p => p.name))];
-        uniquePrograms.forEach(program => {
-            message += `• ${program}\n`;
-        });
-        message += '\n';
-    }
-    
-    // Transaction signature
-    message += `🔗 <a href="https://solscan.io/tx/${sigInfo.signature}">View on Solscan</a>`;
-    
-    // Create inline keyboard with relevant actions
-    const keyboard = {
-        inline_keyboard: []
-    };
-    
-    // Add buy/sell buttons for token transfers
-    if (tokenTransfers.length > 0) {
-        for (const transfer of tokenTransfers) {
-            if (transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
-                const tokenInfo = await getTokenInfo(transfer.mint);
-                keyboard.inline_keyboard.push([
-                    { text: `💰 Buy ${tokenInfo.symbol}`, callback_data: `buy_0.01_${transfer.mint}` },
-                    { text: `📊 Price ${tokenInfo.symbol}`, callback_data: `price_${transfer.mint}` },
-                    { text: `📈 Chart`, url: `https://dexscreener.com/solana/${transfer.mint}` }
-                ]);
-            }
-        }
-    }
-    
-    // Add general transaction buttons
-    keyboard.inline_keyboard.push([
-        { text: '🔍 Solscan', url: `https://solscan.io/tx/${sigInfo.signature}` },
-        { text: '👛 View Wallet', url: `https://solscan.io/account/${walletAddress}` }
-    ]);
-    
-    // Send notification
-    await sendTelegramMessage(message, { reply_markup: keyboard });
-    
-    // Handle copytrading for token buys
-    for (const transfer of tokenTransfers) {
-        if (transfer.direction === 'in' && transfer.mint !== CONFIG.WSOL_ADDRESS && transfer.mint !== CONFIG.USDC_ADDRESS) {
-            await handleCopytrade(walletAddress, transfer.mint, true);
-        }
-    }
-    
-    // Mark as processed
-    processedSignatures.add(sigInfo.signature);
-    
-    console.log(`✅ Transaction ${sigInfo.signature.slice(0, 8)}... fully analyzed`);
-}
-
-// Analyze SOL transfers in transaction
-function analyzeSolTransfers(tx, walletAddress) {
-    const transfers = [];
-    
-    if (!tx.meta) return transfers;
-    
-    // Get account keys
-    const accountKeys = tx.transaction.message.accountKeys || tx.transaction.message.staticAccountKeys || [];
-    
-    // Find wallet index
-    let walletIndex = -1;
-    for (let i = 0; i < accountKeys.length; i++) {
-        const key = accountKeys[i].pubkey || accountKeys[i];
-        if (key.toString() === walletAddress) {
-            walletIndex = i;
-            break;
-        }
-    }
-    
-    if (walletIndex === -1) return transfers;
-    
-    // Calculate SOL balance change
-    const preBalance = tx.meta.preBalances[walletIndex] || 0;
-    const postBalance = tx.meta.postBalances[walletIndex] || 0;
-    const balanceChange = (postBalance - preBalance) / 1e9; // Convert to SOL
-    
-    // Skip if no significant change (accounting for fees)
-    if (Math.abs(balanceChange) < 0.000001) return transfers;
-    
-    // Try to identify counterparty
-    for (let i = 0; i < accountKeys.length; i++) {
-        if (i === walletIndex) continue;
-        
-        const otherPreBalance = tx.meta.preBalances[i] || 0;
-        const otherPostBalance = tx.meta.postBalances[i] || 0;
-        const otherChange = (otherPostBalance - otherPreBalance) / 1e9;
-        
-        // If this account had opposite change, it's likely the counterparty
-        if (Math.abs(otherChange + balanceChange) < 0.001) {
-            const counterparty = (accountKeys[i].pubkey || accountKeys[i]).toString();
-            transfers.push({
-                direction: balanceChange > 0 ? 'in' : 'out',
-                amount: Math.abs(balanceChange),
-                counterparty: counterparty,
-                type: 'SOL'
-            });
-            break;
-        }
-    }
-    
-    // If no counterparty found but balance changed, record as unknown
-    if (transfers.length === 0 && Math.abs(balanceChange) > 0.001) {
-        transfers.push({
-            direction: balanceChange > 0 ? 'in' : 'out',
-            amount: Math.abs(balanceChange),
-            counterparty: 'Unknown',
-            type: 'SOL'
-        });
-    }
-    
-    return transfers;
-}
-
-// Analyze token transfers in transaction
-function analyzeTokenTransfers(tx, walletAddress) {
-    const transfers = [];
-    
-    if (!tx.meta) return transfers;
+// Analyze transaction for token movements
+async function analyzeTransaction(walletAddress, tx, signature) {
+    if (processedSignatures.has(signature)) return null;
     
     const preBalances = tx.meta.preTokenBalances || [];
     const postBalances = tx.meta.postTokenBalances || [];
     
-    // Create maps for easier lookup
-    const preMap = new Map();
-    const postMap = new Map();
+    // Debug log
+    console.log(`\n🔍 Analyzing tx ${signature.slice(0, 8)}... for ${shortenAddress(walletAddress)}`);
+    console.log(`   Pre-balances: ${preBalances.length}, Post-balances: ${postBalances.length}`);
     
+    // Create a complete map of all balance changes in this transaction
+    const allTokens = new Map();
+    
+    // First, add all tokens from pre-balances
     preBalances.forEach(balance => {
         if (balance.owner === walletAddress) {
-            preMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+            allTokens.set(balance.mint, {
+                mint: balance.mint,
+                pre: balance.uiTokenAmount.uiAmount || 0,
+                post: 0,
+                decimals: balance.uiTokenAmount.decimals
+            });
         }
     });
     
+    // Then update/add from post-balances
     postBalances.forEach(balance => {
         if (balance.owner === walletAddress) {
-            postMap.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+            if (allTokens.has(balance.mint)) {
+                allTokens.get(balance.mint).post = balance.uiTokenAmount.uiAmount || 0;
+            } else {
+                allTokens.set(balance.mint, {
+                    mint: balance.mint,
+                    pre: 0,
+                    post: balance.uiTokenAmount.uiAmount || 0,
+                    decimals: balance.uiTokenAmount.decimals
+                });
+            }
         }
     });
     
-    // Check all mints that appear in either pre or post
-    const allMints = new Set([...preMap.keys(), ...postMap.keys()]);
+    console.log(`   Found ${allTokens.size} tokens with balance changes`);
     
-    for (const mint of allMints) {
-        const preAmount = preMap.get(mint) || 0;
-        const postAmount = postMap.get(mint) || 0;
-        const change = postAmount - preAmount;
+    // Now process each token that had any balance change
+    let foundTransfer = false;
+    let transactionTypes = [];
+    
+    for (const [mint, balances] of allTokens) {
+        const change = balances.post - balances.pre;
         
-        if (Math.abs(change) > 0.000001) {
-            transfers.push({
-                mint: mint,
-                direction: change > 0 ? 'in' : 'out',
-                amount: Math.abs(change),
-                isNewToken: preAmount === 0 && postAmount > 0,
-                isFullSell: preAmount > 0 && postAmount === 0,
-                type: 'TOKEN'
-            });
+        // Skip if no change
+        if (change === 0) continue;
+        
+        // Skip tiny dust amounts
+        if (Math.abs(change) < 0.000001) continue;
+        
+        // For WSOL, show all changes above 0.0001 SOL (~$0.01)
+        if (mint === CONFIG.WSOL_ADDRESS && Math.abs(change) < 0.0001) continue;
+        
+        // For USDC, show all changes above $0.01
+        if (mint === CONFIG.USDC_ADDRESS && Math.abs(change) < 0.01) continue;
+        
+        foundTransfer = true;
+        
+        // Get token info
+        const tokenInfo = await getTokenInfo(mint);
+        console.log(`💱 ${change > 0 ? 'RECEIVED' : 'SENT'}: ${Math.abs(change)} ${tokenInfo.symbol || shortenAddress(mint)}`);
+        
+        if (change > 0) {
+            // Token received
+            await handleTokenReceived(walletAddress, mint, change, signature, balances.pre === 0);
+            transactionTypes.push('received');
+            
+            // Check for copytrade
+            await handleCopytrade(walletAddress, mint, true);
+        } else if (change < 0) {
+            // Token sent/sold
+            await handleTokenSent(walletAddress, mint, Math.abs(change), signature, balances.post === 0);
+            transactionTypes.push('sent');
         }
     }
     
-    return transfers;
-}
-
-// Analyze program interactions
-function analyzeProgramInteractions(tx, walletAddress) {
-    const interactions = [];
-    const knownPrograms = {
-        '11111111111111111111111111111111': 'System Program',
-        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA': 'Token Program',
-        'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL': 'Associated Token Program',
-        'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': 'Jupiter v6',
-        'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': 'Orca Whirlpool',
-        '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': 'Raydium V4',
-        'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': 'Raydium CLMM',
-        'MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky': 'Mercurial',
-        'SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ': 'Saber',
-        'EewxydAPCCVuNEyrVN68PuSYdQ7wKn27V9Gjeoi8dy3S': 'Lifinity',
-        'CURVGoZn8zycx6FXwwevgBTB2gVvdbGTEpvMJDbgs2t4': 'Curve',
-        '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP': 'Orca V2',
-        'DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1': 'Orca V1',
-        '9wFFyRfZBsuAha4YcuxcXLKwMxJR43S7fPfQLusDBzvT': 'Serum DEX V3',
-        'EUqojwWA2rd19FZrzeBncJsm38Jm1hEhE3zsmX3bRc2o': 'Serum DEX V2',
-        '22Y43yTVxuUkoRKdm9thyRhQ3SdgQS7c7kB6UNCiaczD': 'Serum DEX V1'
-    };
+    // Mark as processed
+    processedSignatures.add(signature);
     
-    if (!tx.transaction?.message?.instructions) return interactions;
-    
-    const instructions = tx.transaction.message.instructions;
-    
-    for (const instruction of instructions) {
-        const programId = instruction.programId?.toString() || instruction.program;
-        if (programId) {
-            const programName = knownPrograms[programId] || `Unknown (${shortenAddress(programId)})`;
-            interactions.push({
-                programId: programId,
-                name: programName
-            });
-        }
-    }
-    
-    return interactions;
+    return foundTransfer ? { types: transactionTypes } : null;
 }
 
 // ====== NOTIFICATION HANDLERS ======
@@ -1940,13 +1799,13 @@ async function passesTradeFilters(tokenMint, amount = CONFIG.COPYTRADE_AMOUNT_SO
         
         // Check liquidity
         if (analytics.liquidity < COPYTRADE_FILTERS.minLiquidity) {
-            console.log(`❌ Low liquidity: ${analytics.liquidity} < ${COPYTRADE_FILTERS.minLiquidity}`);
+            console.log(`❌ Low liquidity: $${analytics.liquidity} < $${COPYTRADE_FILTERS.minLiquidity}`);
             return false;
         }
         
         // Check market cap
         if (analytics.marketCap < COPYTRADE_FILTERS.minMarketCap) {
-            console.log(`❌ Low market cap: ${analytics.marketCap} < ${COPYTRADE_FILTERS.minMarketCap}`);
+            console.log(`❌ Low market cap: $${analytics.marketCap} < $${COPYTRADE_FILTERS.minMarketCap}`);
             return false;
         }
         
