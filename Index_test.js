@@ -99,6 +99,7 @@ const COPYTRADE_FILTERS = {
 // ====== STATE MANAGEMENT ======
 const walletTokenHoldings = {}; // Track tokens each wallet has held
 const processedSignatures = new Set();
+const notifiedTrades = new Set();
 const walletNames = {
     '4CqecFud362LKgALvChyhj6276he3Sy8yKim1uvFNV1m': '4Cq Wallet',
     'j1oxqtEHFn7rUkdABJLmtVtz5fFmHFs4tCG3fWJnkHX': 'j1o Wallet',
@@ -178,82 +179,91 @@ function initializeTrading() {
 // ====== ENHANCED MONITORING FUNCTION ======
 async function monitorAllWallets() {
     if (!isMonitoring) return;
-    
+
     console.log(`\n🔄 Checking all wallets at ${new Date().toLocaleTimeString()}...`);
-    
+
     for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
-        
+
+        const alertedThisRound = new Set(); // prevent duplicate token alerts
+
         try {
-            // Get ALL recent signatures for this wallet
             const signatures = await connection.getSignaturesForAddress(
                 new PublicKey(walletAddress),
                 { limit: 100 }
             );
-            
+
             console.log(`📝 Found ${signatures.length} transactions for ${walletName}`);
-            
-            // Process each signature
+
             let processedCount = 0;
-            
+
             for (const sigInfo of signatures) {
-                // Skip already processed signatures
-                if (processedSignatures.has(sigInfo.signature)) {
-                    continue;
-                }
-                
-                // Skip transactions from before bot started
+                if (processedSignatures.has(sigInfo.signature)) continue;
+
                 if (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime) {
                     processedSignatures.add(sigInfo.signature);
                     continue;
                 }
-                
+
                 try {
-                    // Get full transaction details
                     const tx = await connection.getParsedTransaction(sigInfo.signature, {
                         maxSupportedTransactionVersion: 0
                     });
-                    
-                    // Skip if transaction doesn't exist or failed
+
                     if (!tx || tx.meta?.err) {
                         processedSignatures.add(sigInfo.signature);
                         continue;
                     }
-                    
-                    // Process valid transaction
-                    await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
-                    processedCount++;
-                    
+
+                    // Parse tokenTransfers
+                    const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
+
+                    // Check if a token transfer occurred and hasn’t been alerted yet
+                    const newTokenTransfer = tokenTransfers.find(
+                        t => t.direction === 'in' && !alertedThisRound.has(t.mint)
+                    );
+
+                    if (newTokenTransfer) {
+                        // Only alert once per wallet per round
+                        await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
+                        alertedThisRound.add(newTokenTransfer.mint);
+                        processedSignatures.add(sigInfo.signature);
+                        processedCount++;
+                        break; // Stop processing more from this wallet
+                    } else {
+                        processedSignatures.add(sigInfo.signature);
+                    }
+
                 } catch (txError) {
                     console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
                 }
             }
-            
+
             if (processedCount > 0) {
-                console.log(`✅ Processed ${processedCount} valid transactions for ${walletName}`);
+                console.log(`✅ Processed 1 transaction for ${walletName} (limited to 1 alert)`);
             }
-            
+
         } catch (error) {
             console.error(`Error monitoring ${walletName}: ${error.message}`);
         }
-        
-        // Add a small delay between wallets to prevent rate limiting
-        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        await new Promise(resolve => setTimeout(resolve, 1000)); // small delay
     }
-    
-    // Clean up old signatures
+
+    // Cleanup
     if (processedSignatures.size > 10000) {
         const sigArray = Array.from(processedSignatures);
         sigArray.slice(0, 5000).forEach(sig => processedSignatures.delete(sig));
         console.log(`🧹 Cleaned up old signatures, kept ${processedSignatures.size}`);
     }
-    
+
     console.log(`✅ Check complete. Next check in ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds.\n`);
-    
-    // Schedule next check
+
+    // Schedule next round
     setTimeout(() => monitorAllWallets(), CONFIG.POLLING_INTERVAL_MS);
 }
+
 
 // Enhanced transaction analyzer that captures ALL transaction types
 async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
@@ -269,6 +279,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
     const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
     const programInteractions = analyzeProgramInteractions(tx, walletAddress);
 
+    // Skip if no meaningful activity
     if (tokenTransfers.length === 0 && solTransfers.length === 0) {
         console.log(`⚠️ Ignored tx ${sigInfo.signature} — no relevant activity`);
         return;
@@ -282,6 +293,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         `✅ Status: ${success ? 'Success' : 'Failed'}\n` +
         `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
 
+    // Show SOL transfers
     if (solTransfers.length > 0) {
         message += `💰 SOL Transfers:\n`;
         for (const sol of solTransfers) {
@@ -291,8 +303,12 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         message += `\n`;
     }
 
+    // Token transfer section
+    let tokenMint = null;
+
     if (tokenTransfers.length > 0) {
         for (const transfer of tokenTransfers) {
+            tokenMint = transfer.mint;
             const tokenInfo = await getTokenInfo(transfer.mint);
             const analytics = await getTokenAnalytics(transfer.mint);
             const shortMint = shortenAddress(transfer.mint);
@@ -308,6 +324,15 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         }
     }
 
+    // Add fallback if no tokenTransfers, but possibly token was still bought
+    if (!tokenMint && tx.meta?.postTokenBalances?.length > 0) {
+        const postToken = tx.meta.postTokenBalances.find(b => b.owner === walletAddress);
+        if (postToken && postToken.mint) {
+            tokenMint = postToken.mint;
+        }
+    }
+
+    // Add program interactions
     if (programInteractions.length > 0) {
         message += `🛠 Program Interactions:\n`;
         const uniquePrograms = [...new Set(programInteractions.map(p => p.name))];
@@ -316,22 +341,28 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         });
     }
 
-    const keyboard = {
-        inline_keyboard: [
-            [
-                { text: '📈 Dexscreener', url: `https://dexscreener.com/solana/${tokenTransfers[0]?.mint}` },
-                { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenTransfers[0]?.mint}` }
-            ],
-            [
-                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` },
-                { text: '🚫 Blacklist', callback_data: `blacklist_${tokenTransfers[0]?.mint}` }
+    // Inline buttons
+    const keyboard = tokenMint
+        ? {
+            inline_keyboard: [
+                [
+                    { text: '📈 Dexscreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+                    { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` }
+                ],
+                [
+                    { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` },
+                    { text: '🚫 Blacklist', callback_data: `blacklist_${tokenMint}` }
+                ]
             ]
-        ]
-    };
+        }
+        : undefined;
 
-    await sendTelegramMessage(message, { reply_markup: keyboard });
+    await sendTelegramMessage(message, keyboard ? { reply_markup: keyboard } : {});
     console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
+
+
+
 
 
 // Analyze SOL transfers in transaction
@@ -400,59 +431,50 @@ function analyzeSolTransfers(tx, walletAddress) {
 // Analyze token transfers in transaction
 function analyzeTokenTransfers(tx, walletAddress) {
     const transfers = [];
+    const ownerKey = walletAddress;
+
     if (!tx.meta) return transfers;
 
-    const tokenChanges = {};
-
-    // Process outer token balances
     const preBalances = tx.meta.preTokenBalances || [];
     const postBalances = tx.meta.postTokenBalances || [];
 
+    const tokenChanges = {};
+
     for (const balance of preBalances) {
-        if (balance.owner === walletAddress) {
-            const mint = balance.mint;
-            tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
-            tokenChanges[mint].pre = balance.uiTokenAmount.uiAmount || 0;
-        }
+        const mint = balance.mint;
+        const owner = balance.owner;
+        const key = `${mint}:${owner}`;
+
+        if (!tokenChanges[key]) tokenChanges[key] = { pre: 0, post: 0, mint, owner };
+        tokenChanges[key].pre = parseFloat(balance.uiTokenAmount.uiAmountString || '0');
     }
 
     for (const balance of postBalances) {
-        if (balance.owner === walletAddress) {
-            const mint = balance.mint;
-            tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
-            tokenChanges[mint].post = balance.uiTokenAmount.uiAmount || 0;
-        }
+        const mint = balance.mint;
+        const owner = balance.owner;
+        const key = `${mint}:${owner}`;
+
+        if (!tokenChanges[key]) tokenChanges[key] = { pre: 0, post: 0, mint, owner };
+        tokenChanges[key].post = parseFloat(balance.uiTokenAmount.uiAmountString || '0');
     }
 
-    // Additional: look into inner instructions (helps when outer balances are missing)
-    const inner = tx.meta.innerInstructions || [];
-    for (const innerIx of inner) {
-        for (const inst of innerIx.instructions || []) {
-            try {
-                if (inst.parsed?.type === 'transfer' && inst.parsed?.info?.mint) {
-                    const mint = inst.parsed.info.mint;
-                    const owner = inst.parsed.info.owner;
-                    if (owner === walletAddress) {
-                        const amount = parseFloat(inst.parsed.info.amount) / Math.pow(10, inst.parsed.info.decimals || 9);
-                        tokenChanges[mint] = tokenChanges[mint] || { pre: 0, post: 0 };
-                        tokenChanges[mint].post += amount;
-                    }
-                }
-            } catch (e) {
-                // silent fail, inner parsing is messy
-            }
-        }
-    }
+    for (const [key, { pre, post, mint, owner }] of Object.entries(tokenChanges)) {
+        if (!ownerKey) continue;
 
-    for (const mint in tokenChanges) {
-        const pre = tokenChanges[mint].pre || 0;
-        const post = tokenChanges[mint].post || 0;
-        const change = post - pre;
-        if (Math.abs(change) > 0.000001) {
+        const delta = post - pre;
+        if (Math.abs(delta) < 0.000001) continue;
+
+        // If this token account is related to the monitored wallet (including system program interactions)
+        if (
+            owner === ownerKey ||
+            tx.transaction.message.accountKeys.some(
+                k => (k.pubkey || k).toString?.() === ownerKey
+            )
+        ) {
             transfers.push({
-                mint: mint,
-                direction: change > 0 ? 'in' : 'out',
-                amount: Math.abs(change),
+                mint,
+                direction: delta > 0 ? 'in' : 'out',
+                amount: Math.abs(delta),
                 isNewToken: pre === 0 && post > 0,
                 isFullSell: pre > 0 && post === 0,
                 type: 'TOKEN'
@@ -462,6 +484,8 @@ function analyzeTokenTransfers(tx, walletAddress) {
 
     return transfers;
 }
+
+
 
 
 // Analyze program interactions
@@ -1068,6 +1092,27 @@ bot.on('callback_query', async (callbackQuery) => {
     const userId = callbackQuery.from.id;
     
     try {
+        if (data.startsWith('remove_copytrade_')) {
+            const parts = data.split('_');
+            const walletAddress = parts[2];
+            const tokenMint = parts[3];
+
+            if (copytradeEnabled[walletAddress]) {
+                delete copytradeEnabled[walletAddress][tokenMint];
+            if (Object.keys(copytradeEnabled[walletAddress]).length === 0) {
+                delete copytradeEnabled[walletAddress];
+            }
+        }
+
+            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autotrade removed.' });
+
+            await bot.sendMessage(chatId,
+                `❌ <b>Autotrade Removed</b>\n\n` +
+                `👛 Wallet: <code>${walletAddress}</code>\n` +
+                `🪙 Token: <code>${tokenMint}</code>`,
+                { parse_mode: 'HTML' }
+            );
+        }
         // Handle blacklist token
         if (data.startsWith('blacklist_')) {
             const tokenMint = data.replace('blacklist_', '');
@@ -2448,5 +2493,51 @@ async function handleCopytrade(walletAddress, tokenMint, isBuying) {
                 { parse_mode: 'HTML' }
             );
         }
+    }
+}
+
+async function autoCopyTrade(walletAddress, tokenMint) {
+    try {
+        const amountSOL = 0.001;
+        const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+
+        const quote = await getJupiterQuote(CONFIG.WSOL_ADDRESS, tokenMint, amountSOL * 1e9, CONFIG.SLIPPAGE_BPS);
+        const txid = await executeSwap(quote);
+
+        if (!copytradeEnabled[walletAddress]) {
+            copytradeEnabled[walletAddress] = {};
+        }
+        copytradeEnabled[walletAddress][tokenMint] = true;
+
+        const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
+        const txLink = `https://solscan.io/tx/${txid}`;
+
+        const message =
+            `✅ <b>Successful Auto Copy Trade</b>\n\n` +
+            `👛 Wallet: ${walletName}\n` +
+            `🪙 Token: <code>${tokenMint}</code>\n` +
+            `💰 Amount: 0.001 SOL\n` +
+            `🔗 <a href="${tokenLink}">View Token</a>\n` +
+            `🧾 <a href="${txLink}">Transaction</a>`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    {
+                        text: '❌ Remove Autotrade',
+                        callback_data: `remove_copytrade_${walletAddress}_${tokenMint}`
+                    }
+                ]
+            ]
+        };
+
+        await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+        });
+
+        console.log(`✅ Auto copytrade successful for ${walletName}: ${tokenMint}`);
+    } catch (err) {
+        console.error(`❌ Auto copytrade failed for ${tokenMint}: ${err.message}`);
     }
 }
