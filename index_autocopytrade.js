@@ -13,6 +13,8 @@ const fetch = require('node-fetch');
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const pendingCopytrades = new Map(); // uid -> { walletAddress, tokenMint }
 
 // Define HELIUS_API_KEY before using it in CONFIG
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || 'db7b00c4-31e1-4ee9-91c9-116f0667cf4a';
@@ -58,7 +60,7 @@ const CONFIG = {
     
     // Copytrade settings
     COPYTRADE_ENABLED: true,
-    COPYTRADE_AMOUNT_SOL: 0.0001, // Always buy 0.001 SOL worth
+    COPYTRADE_AMOUNT_SOL: 0.001, // Always buy 0.001 SOL worth
 };
 
 // Trading limits for safety
@@ -150,29 +152,35 @@ let wallet;
 // Initialize connection and wallet
 function initializeTrading() {
     try {
-        const walletPaths = fs.readdirSync(WALLET_DIR)
-            .filter(file => file.endsWith('.json'))
-            .map(file => path.join(WALLET_DIR, file));
-
-        if (walletPaths.length === 0) {
-            console.error('❌ No wallet JSON files found in:', WALLET_DIR);
+        const rpcUrl = `${CONFIG.HELIUS_RPC_URL}/?api-key=${CONFIG.HELIUS_API_KEY}`;
+        connection = new Connection(rpcUrl, {
+            commitment: 'confirmed',
+            confirmTransactionInitialTimeout: 60000
+        });
+        
+        if (!CONFIG.TRADING_WALLET_PRIVATE_KEY || CONFIG.TRADING_WALLET_PRIVATE_KEY === '') {
+            console.error('❌ TRADING_WALLET_PRIVATE_KEY not set!');
             return false;
         }
-
-        for (const wallet of CONFIG.WALLETS_TO_MONITOR) {
-            copytradeEnabled[wallet.address] = true;
+        
+        try {
+            const privateKeyBytes = bs58.decode(CONFIG.TRADING_WALLET_PRIVATE_KEY);
+            wallet = Keypair.fromSecretKey(privateKeyBytes);
+            console.log(`💰 Trading wallet loaded: ${wallet.publicKey.toString()}`);
+            return true;
+        } catch (decodeError) {
+            console.error('❌ Failed to decode private key:', decodeError.message);
+            return false;
         }
-        console.log('✅ Copytrade enabled for:', Object.keys(copytradeEnabled));
-
-        return true;
-    } catch (err) {
-        console.error('❌ Failed to initialize trading:', err.message);
+    } catch (error) {
+        console.error('❌ Failed to initialize trading:', error);
         return false;
     }
 }
- 
 
 // ====== ENHANCED MONITORING FUNCTION ======
+const processedSignaturesByWallet = new Map(); // walletAddress => Set of signatures
+
 async function monitorAllWallets() {
     if (!isMonitoring) return;
 
@@ -182,7 +190,12 @@ async function monitorAllWallets() {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
 
-        const alertedThisRound = new Set(); // prevent duplicate token alerts
+        const alertedThisRound = new Set();
+        if (!processedSignaturesByWallet.has(walletAddress)) {
+            processedSignaturesByWallet.set(walletAddress, new Set());
+        }
+
+        const walletProcessed = processedSignaturesByWallet.get(walletAddress);
 
         try {
             const signatures = await connection.getSignaturesForAddress(
@@ -190,123 +203,178 @@ async function monitorAllWallets() {
                 { limit: 100 }
             );
 
-            console.log(`📝 Found ${signatures.length} transactions for ${walletName}`);
+            if (!signatures.length) {
+                console.log(`🚫 No transactions found for ${walletName}`);
+                continue;
+            }
 
             let processedCount = 0;
 
             for (const sigInfo of signatures) {
-                if (processedSignatures.has(sigInfo.signature)) continue;
+                const signature = sigInfo.signature;
+
+                if (walletProcessed.has(signature)) continue;
 
                 if (botStartTime && sigInfo.blockTime && sigInfo.blockTime * 1000 < botStartTime) {
-                    processedSignatures.add(sigInfo.signature);
+                    walletProcessed.add(signature);
                     continue;
                 }
 
                 try {
-                    const tx = await connection.getParsedTransaction(sigInfo.signature, {
+                    const tx = await connection.getParsedTransaction(signature, {
                         maxSupportedTransactionVersion: 0
                     });
 
                     if (!tx || tx.meta?.err) {
-                        processedSignatures.add(sigInfo.signature);
+                        walletProcessed.add(signature);
                         continue;
                     }
 
-                    // Parse tokenTransfers
                     const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
-
-                    // Check if a token transfer occurred and hasn’t been alerted yet
-                    const newTokenTransfer = tokenTransfers.find(
+                    const hasNewToken = tokenTransfers.some(
                         t => t.direction === 'in' && !alertedThisRound.has(t.mint)
                     );
 
-                    if (newTokenTransfer) {
-                        // Only alert once per wallet per round
+                    if (hasNewToken || tx.transaction.message.instructions.length > 0) {
                         await analyzeAllTransactionTypes(walletAddress, tx, sigInfo);
-                        alertedThisRound.add(newTokenTransfer.mint);
-                        processedSignatures.add(sigInfo.signature);
+                        tokenTransfers.forEach(t => alertedThisRound.add(t.mint));
                         processedCount++;
-                        break; // Stop processing more from this wallet
-                    } else {
-                        processedSignatures.add(sigInfo.signature);
                     }
 
+                    walletProcessed.add(signature);
+
                 } catch (txError) {
-                    console.error(`Error processing tx ${sigInfo.signature.slice(0, 8)}...: ${txError.message}`);
+                    console.error(`❌ Error parsing tx ${signature.slice(0, 8)}...: ${txError.message}`);
+                    continue;
                 }
             }
 
             if (processedCount > 0) {
-                console.log(`✅ Processed 1 transaction for ${walletName} (limited to 1 alert)`);
+                console.log(`✅ Processed ${processedCount} new tx(s) for ${walletName}`);
             }
 
         } catch (error) {
-            console.error(`Error monitoring ${walletName}: ${error.message}`);
+            console.error(`❌ Failed to check wallet ${walletName}: ${error.message}`);
         }
 
-        await new Promise(resolve => setTimeout(resolve, 1000)); // small delay
+        await new Promise(resolve => setTimeout(resolve, 1000)); // short delay between wallets
     }
 
-    // Cleanup
-    if (processedSignatures.size > 10000) {
-        const sigArray = Array.from(processedSignatures);
-        sigArray.slice(0, 5000).forEach(sig => processedSignatures.delete(sig));
-        console.log(`🧹 Cleaned up old signatures, kept ${processedSignatures.size}`);
+    // Cleanup old signatures per wallet
+    for (const [wallet, sigSet] of processedSignaturesByWallet.entries()) {
+        if (sigSet.size > 10000) {
+            const sigArray = Array.from(sigSet);
+            sigArray.slice(0, 5000).forEach(sig => sigSet.delete(sig));
+        }
     }
 
-    console.log(`✅ Check complete. Next check in ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds.\n`);
+    console.log(`✅ Wallet check complete. Next check in ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds.\n`);
 
-    // Schedule next round
-    setTimeout(() => monitorAllWallets(), CONFIG.POLLING_INTERVAL_MS);
+    setTimeout(monitorAllWallets, CONFIG.POLLING_INTERVAL_MS);
 }
+
+
+
 
 
 // Enhanced transaction analyzer that captures ALL transaction types
-async function analyzeAllTransactionTypes(walletAddress, tokenTransfers, signature, blockTime) {
-    if (!Array.isArray(tokenTransfers)) return;
+function createAutocopytradeCallback(walletAddress, tokenMint) {
+    const uid = uuidv4().slice(0, 8); // Short uid (8 chars)
+    pendingCopytrades.set(uid, { walletAddress, tokenMint });
+    return `autocopytrade_${uid}`;
+}
 
-    for (const transfer of tokenTransfers) {
-        const { mint, amount, direction, tokenStandard } = transfer;
-        if (!mint || !direction || tokenStandard !== 'Fungible') continue;
+function safeCallbackData(prefix, value) {
+    return `${prefix}_${value}`;
+}
 
-        const uniqueKey = `${walletAddress}_${signature}_${mint}`;
-        if (processedSignatures.has(uniqueKey)) continue;
-        processedSignatures.add(uniqueKey);
+async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
+    if (processedSignatures.has(sigInfo.signature)) return;
+    processedSignatures.add(sigInfo.signature);
 
-        const tokenInfo = await fetchTokenInfo(mint);
-        const name = tokenInfo?.name || 'Unknown Token';
-        const symbol = tokenInfo?.symbol || '???';
-        const logo = tokenInfo?.logoURI || null;
-        const amountFormatted = formatTokenAmount(amount || 0, tokenInfo?.decimals || 6);
-        const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const txTime = sigInfo.blockTime ? new Date(sigInfo.blockTime * 1000).toLocaleString() : 'Unknown time';
+    const success = !tx.meta?.err;
+    const fee = (tx.meta?.fee || 0) / 1e9;
 
-        if (direction === 'in') {
-            // ✅ 1. Telegram alert about original wallet trade
+    const solTransfers = analyzeSolTransfers(tx, walletAddress);
+    const tokenTransfers = analyzeTokenTransfers(tx, walletAddress);
+    const programInteractions = analyzeProgramInteractions(tx, walletAddress);
+
+    if (tokenTransfers.length === 0 && solTransfers.length === 0) {
+        console.log(`⚠️ Ignored tx ${sigInfo.signature} — no relevant activity`);
+        return;
+    }
+
+    // General TX info (sent once per tx)
+    let message =
+        `📋 TRANSACTION DETECTED\n\n` +
+        `👛 Wallet: ${walletName}\n` +
+        `${walletAddress}\n` +
+        `⏰ Time: ${txTime}\n` +
+        `✅ Status: ${success ? 'Success' : 'Failed'}\n` +
+        `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
+
+    if (solTransfers.length > 0) {
+        message += `💰 SOL Transfers:\n`;
+        for (const sol of solTransfers) {
+            const sEmoji = sol.direction === 'in' ? '📥' : '📤';
+            message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sent'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
+        }
+        message += `\n`;
+    }
+
+    await sendTelegramMessage(message);
+
+    // Token Transfers — One message per token
+    if (tokenTransfers.length > 0) {
+        for (const transfer of tokenTransfers) {
+            const tokenMint = transfer.mint;
+            const tokenInfo = await getTokenInfo(tokenMint);
+            const analytics = await getTokenAnalytics(tokenMint);
+            const shortMint = shortenAddress(tokenMint);
+            const direction = transfer.direction === 'in' ? '+' : '-';
+            const emoji = transfer.direction === 'in' ? '📥' : '📤';
+
+            const tokenMessage =
+                `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
+                `👛 Wallet: <b>${walletName}</b>\n` +
+                `<code>${walletAddress}</code>\n\n` +
+                `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+                `📊 <b>Amount:</b> ${direction}${formatNumber(transfer.amount)}\n` +
+                `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
+                `👥 <b>Holders:</b> ${analytics.holders}\n` +
+                `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
+
             const keyboard = {
                 inline_keyboard: [
-                    [{ text: '📈 View Token', url: `https://dexscreener.com/solana/${mint}` }]
+                    [
+                        { text: '📈 Dexscreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+                        { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` }
+                    ],
+                    [
+                        { text: '🤖 Autocopytrade', callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
+                        { text: '🚫 Blacklist', callback_data: safeCallbackData('blacklist', tokenMint) }
+                    ]
                 ]
             };
 
-            await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID,
-                `📥 <b>Token BUY detected</b>\n\n` +
-                `👛 Wallet: <b>${walletName}</b>\n` +
-                `🪙 Token: <b>${symbol}</b>\n` +
-                `💰 Amount: <b>${amountFormatted}</b>\n` +
-                `🕐 Time: ${formatTime(blockTime)}\n\n` +
-                `<code>${mint}</code>`,
-                { parse_mode: 'HTML', reply_markup: keyboard }
-            );
-
-            // ✅ 2. Inline copytrade (non-blocking, global-enabled, skips WSOL)
-            if (CONFIG.COPYTRADE_ENABLED && mint !== CONFIG.WSOL_ADDRESS) {
-                handleCopytrade(walletAddress, mint, true).catch(err =>
-                    console.error(`[COPYTRADE ERROR] ${err.message}`)
-                );
-            }
+            await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
         }
     }
+
+    // Program interaction summary
+    if (programInteractions.length > 0) {
+        const programs = [...new Set(programInteractions.map(p => p.name))];
+        const interactionMessage = `🛠 Program Interactions:\n` + programs.map(p => `• ${p}`).join('\n');
+        await sendTelegramMessage(interactionMessage);
+    }
+
+    console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
+
+
+
 
 
 
@@ -568,7 +636,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
             ],
             [
                 { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` },
-                { text: '🔄 Copytrade', callback_data: `copytrade_${walletAddress}` }
+                { text: '🤖 Autocopytrade', callback_data: `autocopytrade_${walletAddress}_${tokenMint}` }
             ],
             [
                 { text: '🚫 Blacklist Token', callback_data: `blacklist_${tokenMint}` },
@@ -579,6 +647,16 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
 
     await sendTelegramMessage(message, { reply_markup: keyboard });
     console.log(`${emoji} ${statusText}: ${tokenInfo.symbol} (${tokenMint}) by ${walletName}`);
+
+    // ✅ Autocopytrade SELL detection
+    if (copytradeEnabled[walletAddress] && copytradeEnabled[walletAddress][tokenMint]) {
+        console.log(`📉 Selling due to autocopytrade for ${tokenMint}`);
+        const userBalance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
+        if (userBalance > 0) {
+            await sellToken(walletAddress, tokenMint, userBalance);
+            delete copytradeEnabled[walletAddress][tokenMint];
+        }
+    }
 }
 
 // ====== PRICE FUNCTIONS ======
@@ -880,34 +958,28 @@ async function getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300)
             onlyDirectRoutes: 'false',
             asLegacyTransaction: 'false',
         });
-
-        const url = `${CONFIG.JUPITER_API_URL}/quote?${params}`;
-        console.log(`[DEBUG] Fetching Jupiter quote: ${url}`);
-
-        const response = await fetch(url);
+        
+        const response = await fetch(`${CONFIG.JUPITER_API_URL}/quote?${params}`);
         const quote = await response.json();
-
-        if (!quote || quote.error || !quote.outAmount || quote.routes?.length === 0) {
-            console.error(`[JUPITER ERROR] No valid quote:`, quote?.error || quote);
-            return null;
+        
+        if (!quote || quote.error) {
+            throw new Error(quote?.error || 'Failed to get quote');
         }
-
-        console.log(`[DEBUG] Jupiter quote success: ${quote.outAmount} units out`);
+        
         return quote;
     } catch (error) {
-        console.error('[ERROR] Failed to fetch Jupiter quote:', error.message);
-        return null;
+        console.error('Error getting Jupiter quote:', error);
+        throw error;
     }
 }
 
-
 async function executeSwap(quoteResponse) {
     try {
-        console.log(`[DEBUG] Requesting Jupiter swap transaction`);
-
-        const response = await fetch(`${CONFIG.JUPITER_API_URL}/swap`, {
+        const swapResponse = await fetch(`${CONFIG.JUPITER_API_URL}/swap`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json'
+            },
             body: JSON.stringify({
                 quoteResponse,
                 userPublicKey: wallet.publicKey.toString(),
@@ -916,53 +988,37 @@ async function executeSwap(quoteResponse) {
                 priorityFee: 'auto'
             })
         });
-
-        const swapData = await response.json();
-
+        
+        const swapData = await swapResponse.json();
+        
         if (!swapData.swapTransaction) {
-            console.error(`[ERROR] No swap transaction returned from Jupiter`);
-            throw new Error('No swap transaction returned from Jupiter');
+            throw new Error('Failed to get swap transaction');
         }
-
-        const transactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
-        const transaction = VersionedTransaction.deserialize(transactionBuf);
-
-        // Sign
+        
+        const swapTransactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
+        const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+        
         transaction.sign([wallet]);
-
-        const rawTx = transaction.serialize();
-        const txid = await connection.sendRawTransaction(rawTx, {
+        
+        const rawTransaction = transaction.serialize();
+        const txid = await connection.sendRawTransaction(rawTransaction, {
             skipPreflight: true,
             maxRetries: 3
         });
-
-        console.log(`[DEBUG] Swap transaction submitted: ${txid}`);
-
-        const latestBlockhash = await connection.getLatestBlockhash();
-        const confirmation = await connection.confirmTransaction(
-            {
-                signature: txid,
-                blockhash: latestBlockhash.blockhash,
-                lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-            },
-            'confirmed'
-        );
-
-        if (confirmation?.value?.err) {
-            throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-        }
-
-        console.log(`[✅] Swap confirmed: ${txid}`);
+        
+        const latestBlockHash = await connection.getLatestBlockhash();
+        await connection.confirmTransaction({
+            signature: txid,
+            blockhash: latestBlockHash.blockhash,
+            lastValidBlockHeight: latestBlockHash.lastValidBlockHeight
+        }, 'confirmed');
+        
         return txid;
-
     } catch (error) {
-        console.error(`[SWAP ERROR] ${error.message}`);
+        console.error('Error executing swap:', error);
         throw error;
     }
 }
-
-
-
 
 async function buyToken(walletAddress, tokenMint, solAmount) {
     const tokenInfo = await getTokenInfo(tokenMint);
@@ -1085,6 +1141,91 @@ bot.on('callback_query', async (callbackQuery) => {
                 { parse_mode: 'HTML' }
             );
         }
+
+        if (data.startsWith('autocopytrade_')) {
+    const uid = data.split('_')[1];
+    const stored = pendingCopytrades.get(uid);
+
+    if (!stored || !stored.walletAddress || !stored.tokenMint) {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: '❌ Invalid or expired autocopytrade data',
+            show_alert: true
+        });
+        return;
+    }
+
+    const { walletAddress, tokenMint } = stored;
+
+    try {
+        const solAmount = 0.0001;
+
+        const quote = await getJupiterQuote(
+            CONFIG.WSOL_ADDRESS,
+            tokenMint,
+            solAmount * 1e9,
+            CONFIG.SLIPPAGE_BPS
+        );
+
+        const txid = await executeSwap(quote);
+
+        if (!copytradeEnabled[walletAddress]) copytradeEnabled[walletAddress] = {};
+        copytradeEnabled[walletAddress][tokenMint] = true;
+
+        const tokenInfo = await getTokenInfo(tokenMint);
+        const tokenName = tokenInfo?.symbol || tokenMint;
+
+      const removeId = uuidv4().slice(0, 8);
+pendingCopytrades.set(removeId, { walletAddress, tokenMint });
+
+await bot.sendMessage(chatId,
+    `✅ <b>Autocopytrade Successful</b>\n\n` +
+    `👛 <b>Wallet:</b> <code>${walletAddress}</code>\n` +
+    `🪙 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenName}</a>\n` +
+    `💰 Bought: ${solAmount} SOL worth`,
+    {
+        parse_mode: 'HTML',
+        disable_web_page_preview: false,
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    {
+                        text: '❌ Remove Autocopytrade',
+                        callback_data: `remove_copy_${removeId}`
+                    }
+                ]
+            ]
+        }
+    }
+);
+
+        await bot.sendMessage(chatId, `🔚 To stop copytrading this token, click below:`, {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        {
+                            text: '❌ Remove Autocopytrade',
+                            callback_data: `remove_copytrade_${walletAddress}_${tokenMint}`
+                        }
+                    ]
+                ]
+            }
+        });
+
+        await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autocopytrade successful!' });
+    } catch (err) {
+        console.error(`❌ Autocopytrade Error: ${err.message}`);
+        await bot.sendMessage(chatId,
+            `❌ <b>Autocopytrade Failed</b>\n\n` +
+            `Error:\n<code>${err.message}</code>`,
+            { parse_mode: 'HTML' }
+        );
+        await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autocopytrade failed.' });
+    }
+
+    return;
+}
+
+
         // Handle blacklist token
         if (data.startsWith('blacklist_')) {
             const tokenMint = data.replace('blacklist_', '');
@@ -2231,53 +2372,38 @@ async function calculateProfitLoss(tokenMint) {
 // Monitor open positions for profit targets and trailing stops
 async function monitorPositions() {
     if (tradingPaused) return;
-
+    
     console.log(`\n📊 Monitoring positions at ${new Date().toLocaleTimeString()}...`);
-
+    
     // Update SOL price first
     await getSolPriceUSD();
-
+    
     // Get all positions with open balances
     for (const [tokenMint, history] of Object.entries(tradeHistory)) {
         // Skip if no open position
         if (history.totalBought <= history.totalSold) continue;
-
+        
         try {
             // Get current balance
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
             if (balance === 0) continue;
-
-            // Safely get current price
-            let currentPrice;
-            try {
-                currentPrice = await getTokenPrice(tokenMint);
-                if (!currentPrice) throw new Error("No price returned");
-            } catch (err) {
-                const tokenInfo = await getTokenInfo(tokenMint).catch(() => ({ symbol: tokenMint.slice(0, 6) }));
-                const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
-                await sendTelegramMessage(
-                    `❌ Failed to fetch price for <b>${tokenInfo.symbol}</b>\n` +
-                    `Mint: <code>${tokenMint}</code>\n` +
-                    `Reason: ${err.message}\n` +
-                    `<a href="${tokenLink}">Dexscreener</a>`,
-                    { parse_mode: 'HTML' }
-                );
-                console.error(`❌ Price fetch failed for ${tokenMint}:`, err.message);
-                continue;
-            }
-
+            
+            // Get current price
+            const currentPrice = await getTokenPrice(tokenMint);
+            if (!currentPrice) continue;
+            
             const tokenInfo = await getTokenInfo(tokenMint);
             const profitPercent = ((currentPrice - history.averageBuyPrice) / history.averageBuyPrice) * 100;
-
+            
             console.log(`📊 ${tokenInfo.symbol}: ${profitPercent >= 0 ? '+' : ''}${profitPercent.toFixed(2)}% (${currentPrice.toFixed(8)} SOL)`);
-
+            
             // Check profit targets
             await checkProfitTargets(tokenMint);
-
+            
             // Update trailing stop loss
             await updateTrailingStopLoss(tokenMint);
-
-            // Risk warning if deep in loss
+            
+            // Check if position is at risk (optional warning)
             if (profitPercent < -20 && !history.riskWarningsSent) {
                 history.riskWarningsSent = true;
                 await sendTelegramMessage(
@@ -2290,18 +2416,17 @@ async function monitorPositions() {
                     { parse_mode: 'HTML' }
                 );
             }
-
+            
         } catch (error) {
             console.error(`Error monitoring position ${tokenMint}: ${error.message}`);
         }
-
-        // Small delay between tokens
+        
+        // Small delay between positions
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-
+    
     console.log(`✅ Position monitoring complete\n`);
 }
-
 // ====== HELPER FUNCTIONS ======
 function shortenAddress(address) {
     if (!address || address.length < 10) return address;
@@ -2392,110 +2517,105 @@ async function getTokenInfo(tokenAddress) {
 }
 
 // ====== COPYTRADE FUNCTION WITH FILTERS ======
-async function handleCopytrade(walletAddress, tokenMint, triggeredByBuy = false) {
-    try {
-        if (!CONFIG.COPYTRADE_ENABLED) {
-            console.log('⚠️ Copytrade is globally disabled.');
+async function handleCopytrade(walletAddress, tokenMint, isBuying) {
+    // Check if copytrade is enabled for this wallet
+    if (!copytradeEnabled[walletAddress] || !CONFIG.COPYTRADE_ENABLED || tradingPaused) return;
+    
+    // Create unique identifier for this trade
+    const tradeId = `${walletAddress}_${tokenMint}_${isBuying ? 'buy' : 'sell'}_${Date.now()}`;
+     
+    // Check if we've already processed this copytrade
+    if (processedCopytrades.has(tradeId)) return;
+    processedCopytrades.add(tradeId);
+    
+    // Clean up old copytrade IDs (keep last 1000)
+    if (processedCopytrades.size > 1000) {
+        const idsArray = Array.from(processedCopytrades);
+        idsArray.slice(0, 500).forEach(id => processedCopytrades.delete(id));
+    }
+    
+    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
+    const tokenInfo = await getTokenInfo(tokenMint);
+    
+    if (isBuying) {
+        // Check filters before copying trade
+        console.log(`🔍 Analyzing copytrade opportunity for ${tokenInfo.symbol}...`);
+        
+        const passesFilters = await passesTradeFilters(tokenMint, CONFIG.COPYTRADE_AMOUNT_SOL);
+        
+        if (!passesFilters) {
+            console.log(`❌ Token ${tokenInfo.symbol} failed safety filters - skipping copytrade`);
+            await sendTelegramMessage(
+                `⚠️ <b>COPYTRADE SKIPPED - FAILED FILTERS</b>\n\n` +
+                `👛 Wallet: <b>${walletName}</b> bought\n` +
+                `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+                `❌ Reason: Failed safety checks\n\n` +
+                `<i>Token didn't meet minimum requirements for liquidity, holders, or slippage.</i>`,
+                { parse_mode: 'HTML' }
+            );
             return;
         }
-
-        if (!copytradeEnabled[walletAddress]) {
-            console.log(`ℹ️ Copytrade not enabled for wallet ${walletAddress}`);
+        
+        // Check position sizing
+        const currentPositions = Object.keys(tradeHistory).filter(
+            mint => tradeHistory[mint].totalBought > tradeHistory[mint].totalSold
+        ).length;
+        
+        if (currentPositions >= RISK_MANAGEMENT.maxOpenPositions) {
+            console.log(`❌ Max positions (${RISK_MANAGEMENT.maxOpenPositions}) reached`);
+            await sendTelegramMessage(
+                `⚠️ <b>COPYTRADE SKIPPED - MAX POSITIONS</b>\n\n` +
+                `Current positions: ${currentPositions}/${RISK_MANAGEMENT.maxOpenPositions}\n` +
+                `Close some positions before opening new ones.`,
+                { parse_mode: 'HTML' }
+            );
             return;
         }
-
-        if (tokenMint === CONFIG.WSOL_ADDRESS) {
-            console.log('⏭️ Skipping WSOL copytrade (no point in trading SOL for SOL)');
-            return;
-        }
-
-        console.log(`🔄 Starting AutoCopyTrade for token: ${tokenMint}`);
-
-        const solAmount = CONFIG.COPYTRADE_AMOUNT_SOL;
-        const quote = await getJupiterQuote(CONFIG.WSOL_ADDRESS, tokenMint, solAmount * 1e9, CONFIG.SLIPPAGE_BPS);
-
-        if (!quote) {
-            console.error('❌ No valid Jupiter quote for this token.');
-            return;
-        }
-
-        const txid = await executeSwap(quote);
-        if (!txid) {
-            console.error('❌ Swap execution failed.');
-            return;
-        }
-
-        const latestBlockhash = await connection.getLatestBlockhash();
-        const confirmation = await connection.confirmTransaction(
-            {
-                signature: txid,
-                blockhash: latestBlockhash.blockhash,
-                lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-            },
-            'confirmed'
+        
+        // Execute copytrade buy
+        console.log(`🔄 Executing filtered copytrade: Buying ${CONFIG.COPYTRADE_AMOUNT_SOL} SOL worth of ${tokenInfo.symbol}`);
+        
+        await sendTelegramMessage(
+            `🔄 <b>SMART COPYTRADE TRIGGERED</b>\n\n` +
+            `👛 Following: <b>${walletName}</b>\n` +
+            `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+            `✅ Passed all safety filters\n` +
+            `💰 Buying: ${CONFIG.COPYTRADE_AMOUNT_SOL} SOL worth\n\n` +
+            `<i>Executing trade...</i>`,
+            { parse_mode: 'HTML' }
         );
-
-        if (confirmation?.value?.err) {
-            console.error(`❌ Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-            return;
+        
+        const result = await buyToken(tokenMint, CONFIG.COPYTRADE_AMOUNT_SOL);
+        
+        if (result.success) {
+            await sendTelegramMessage(
+                `✅ <b>SMART COPYTRADE SUCCESSFUL!</b>\n\n` +
+                `👛 Copied: <b>${walletName}</b>\n` +
+                `🪙 Token: <b>${tokenInfo.symbol}</b>\n` +
+                `💰 Spent: ${CONFIG.COPYTRADE_AMOUNT_SOL} SOL\n` +
+                `📊 Received: ${formatNumber(result.amount)} tokens\n` +
+                `🎯 Auto profit targets: 10%, 25%, 50%, 100%\n` +
+                `🛡️ Protection: Trailing stop loss ready\n` +
+                `🔗 <a href="https://solscan.io/tx/${result.txid}">View Transaction</a>`,
+                { parse_mode: 'HTML', disable_web_page_preview: true }
+            );
+        } else {
+            await sendTelegramMessage(
+                `❌ <b>COPYTRADE FAILED</b>\n\n` +
+                `Error: ${result.error}`,
+                { parse_mode: 'HTML' }
+            );
         }
-
-        console.log(`[✅] Swap confirmed: ${txid}`);
-
-        const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-        const keyboard = {
-            inline_keyboard: [
-                [
-                    { text: '📈 View Token', url: `https://dexscreener.com/solana/${tokenMint}` }
-                ],
-                [
-                    { text: '❌ Remove AutoTrade', callback_data: `remove_copytrade_${walletAddress}_${tokenMint}` }
-                ]
-            ]
-        };
-
-        const message =
-            `✅ <b>Successful AutoCopy Trade</b>\n\n` +
-            `👛 Wallet: <b>${walletName}</b>\n` +
-            `💰 Bought: <b>${solAmount} SOL</b>\n` +
-            `🪙 Token: <code>${tokenMint}</code>\n` +
-            `🔗 <a href="https://dexscreener.com/solana/${tokenMint}">View Token</a>\n` +
-            `🔁 <i>You will now auto-buy this token when ${walletName} does</i>`;
-
-        await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
-            parse_mode: 'HTML',
-            reply_markup: keyboard
-        });
-
-        console.log(`✅ Telegram message sent for ${tokenMint}`);
-    } catch (error) {
-        console.error(`❌ handleCopytrade error: ${error.message}`);
     }
 }
 
-
-
-
-
-
-
-
-
-
 async function autoCopyTrade(walletAddress, tokenMint) {
-    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    const amountSOL = 0.0001;
-    const lamports = amountSOL * web3.LAMPORTS_PER_SOL;
-
     try {
-        console.log(`🚀 Starting autoCopyTrade: ${walletName} → ${tokenMint} at ${amountSOL} SOL`);
+        const amountSOL = 0.0001;
+        const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
 
-        const quote = await getJupiterQuote(CONFIG.WSOL_ADDRESS, tokenMint, lamports, CONFIG.SLIPPAGE_BPS);
-        if (!quote || !quote.routePlan || quote.routePlan.length === 0) {
-            throw new Error("No route returned from Jupiter");
-        }
-
-        const txid = await executeSwap(quote, tokenMint);
+        const quote = await getJupiterQuote(CONFIG.WSOL_ADDRESS, tokenMint, amountSOL * 1e9, CONFIG.SLIPPAGE_BPS);
+        const txid = await executeSwap(quote);
 
         if (!copytradeEnabled[walletAddress]) {
             copytradeEnabled[walletAddress] = {};
@@ -2504,13 +2624,14 @@ async function autoCopyTrade(walletAddress, tokenMint) {
 
         const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
         const txLink = `https://solscan.io/tx/${txid}`;
+
         const message =
-            `✅ <b>Auto Copy Trade Executed</b>\n\n` +
+            `✅ <b>Successful Auto Copy Trade</b>\n\n` +
             `👛 Wallet: ${walletName}\n` +
             `🪙 Token: <code>${tokenMint}</code>\n` +
-            `💰 Bought at: ${amountSOL} SOL\n` +
-            `🔗 <a href="${tokenLink}">Dexscreener</a>\n` +
-            `🧾 <a href="${txLink}">View Transaction</a>`;
+            `💰 Amount: 0.001 SOL\n` +
+            `🔗 <a href="${tokenLink}">View Token</a>\n` +
+            `🧾 <a href="${txLink}">Transaction</a>`;
 
         const keyboard = {
             inline_keyboard: [
@@ -2528,23 +2649,8 @@ async function autoCopyTrade(walletAddress, tokenMint) {
             reply_markup: keyboard
         });
 
-        console.log(`✅ Auto copytrade SUCCESS: ${walletName} → ${tokenMint} | TX: ${txid}`);
+        console.log(`✅ Auto copytrade successful for ${walletName}: ${tokenMint}`);
     } catch (err) {
-        const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
-        const message =
-            `❌ <b>Auto Copy Trade Failed</b>\n\n` +
-            `👛 Wallet: ${walletName}\n` +
-            `🪙 Token: <code>${tokenMint}</code>\n` +
-            `💬 Reason: ${err.message || 'Unknown error'}\n` +
-            `🔗 <a href="${tokenLink}">Dexscreener</a>`;
-
-        await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, { parse_mode: 'HTML' });
-        console.error(`❌ Auto copytrade FAILED for ${walletName} → ${tokenMint}: ${err.message}`);
+        console.error(`❌ Auto copytrade failed for ${tokenMint}: ${err.message}`);
     }
 }
-
-
-
-
-
-
