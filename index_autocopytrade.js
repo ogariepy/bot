@@ -16,6 +16,8 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const pendingCopytrades = new Map(); // uid -> { walletAddress, tokenMint }
 
+
+
 // Define HELIUS_API_KEY before using it in CONFIG
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || 'db7b00c4-31e1-4ee9-91c9-116f0667cf4a';
 
@@ -347,17 +349,22 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
                 `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
 
             const keyboard = {
-                inline_keyboard: [
-                    [
-                        { text: '📈 Dexscreener', url: `https://dexscreener.com/solana/${tokenMint}` },
-                        { text: '🦅 Birdeye', url: `https://birdeye.so/token/${tokenMint}` }
-                    ],
-                    [
-                        { text: '🤖 Autocopytrade', callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
-                        { text: '🚫 Blacklist', callback_data: safeCallbackData('blacklist', tokenMint) }
-                    ]
-                ]
-            };
+    inline_keyboard: [
+        [
+            { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+        ],
+        [
+            { text: "🤖 Autocopytrade", callback_data: `copy_${tokenMint}` },
+            { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
+        ],
+        [
+            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` }
+        ]
+    ]
+};
+
+
 
             await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
         }
@@ -1120,27 +1127,68 @@ bot.on('callback_query', async (callbackQuery) => {
     const userId = callbackQuery.from.id;
     
     try {
-        if (data.startsWith('remove_copytrade_')) {
-            const parts = data.split('_');
-            const walletAddress = parts[2];
-            const tokenMint = parts[3];
+        if (data.startsWith('remove_copy_')) {
+    const uid = data.split('_')[2];
+    const stored = pendingCopytrades.get(uid);
 
-            if (copytradeEnabled[walletAddress]) {
-                delete copytradeEnabled[walletAddress][tokenMint];
+    if (stored) {
+        const { walletAddress, tokenMint } = stored;
+
+        if (copytradeEnabled[walletAddress]) {
+            delete copytradeEnabled[walletAddress][tokenMint];
             if (Object.keys(copytradeEnabled[walletAddress]).length === 0) {
                 delete copytradeEnabled[walletAddress];
             }
         }
 
-            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autotrade removed.' });
+        await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autotrade removed.' });
 
-            await bot.sendMessage(chatId,
-                `❌ <b>Autotrade Removed</b>\n\n` +
-                `👛 Wallet: <code>${walletAddress}</code>\n` +
-                `🪙 Token: <code>${tokenMint}</code>`,
-                { parse_mode: 'HTML' }
-            );
-        }
+        await bot.sendMessage(chatId,
+            `❌ <b>Autotrade Removed</b>\n\n` +
+            `👛 Wallet: <code>${walletAddress}</code>\n` +
+            `🪙 Token: <code>${tokenMint}</code>`,
+            { parse_mode: 'HTML' }
+        );
+    } else {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: '❌ Invalid remove request',
+            show_alert: true
+        });
+    }
+    return;
+}
+
+// STEP 1: Show trading mode options
+if (data.startsWith("auto_trade_token_")) {
+    const tokenAddress = data.replace("auto_trade_token_", "");
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: "⚙️ Manual Trade", callback_data: `auto_trade_manual_${tokenAddress}` },
+                { text: "⚡ Quick Trade (0.0001)", callback_data: `auto_trade_preset_${tokenAddress}` }
+            ]
+        ]
+    };
+
+    await bot.sendMessage(chatId, `🛠 Choose trading mode for token:\n<code>${tokenAddress}</code>`, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard
+    });
+    return;
+}
+
+// STEP 2: Handle trade mode selection
+if (data.startsWith("auto_trade_manual_") || data.startsWith("auto_trade_preset_")) {
+    const isManual = data.startsWith("auto_trade_manual_");
+    const tokenAddress = data.split("_").pop();
+    const mode = isManual ? "manual" : "preset";
+
+    await bot.answerCallbackQuery(callbackQuery.id, { text: `Starting ${mode} trade...` });
+    await auto_trade(chatId, mode, tokenAddress);
+    return;
+}
+
 
         if (data.startsWith('autocopytrade_')) {
     const uid = data.split('_')[1];
@@ -1225,6 +1273,37 @@ await bot.sendMessage(chatId,
     return;
 }
 
+if (data === 'auto_trade_menu') {
+    const tradeKeyboard = {
+        inline_keyboard: [
+            [
+                { text: '⚙️ Manual Trade', callback_data: 'auto_trade_manual' },
+                { text: '⚡ Quick Trade (0.0001)', callback_data: 'auto_trade_preset' }
+            ]
+        ]
+    };
+
+    await bot.sendMessage(chatId, "🛠 Choose your trading mode:", {
+        reply_markup: tradeKeyboard
+    });
+    return;
+}
+
+if (data === 'auto_trade_manual' || data === 'auto_trade_preset') {
+    const mode = data === 'auto_trade_manual' ? 'manual' : 'preset';
+    await bot.answerCallbackQuery(callbackQuery.id, { text: `Starting ${mode} trade...` });
+    await auto_trade(chatId, mode);
+    return;
+}
+
+
+
+
+if (data === 'portfolio') {
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await handlePortfolioCommand(chatId);
+    return;
+}
 
         // Handle blacklist token
         if (data.startsWith('blacklist_')) {
@@ -1638,6 +1717,9 @@ bot.onText(/\/start/, async (msg) => {
                 { text: '📊 P/L Report', callback_data: 'cmd_pl' },
             ],
             [
+                { text: "🛠 Autotrade", callback_data: "auto_trade_menu" }
+            ],
+            [
                 { text: '💹 Price Alerts', callback_data: 'cmd_alerts' },
                 { text: '🔄 Copytrade', callback_data: 'cmd_copytrade' },
             ],
@@ -1832,23 +1914,24 @@ bot.onText(/\/copytrade/, async (msg) => {
     });
 });
 
+
+
 bot.onText(/\/portfolio/, async (msg) => {
     if (!wallet) {
         await bot.sendMessage(msg.chat.id, '❌ No trading wallet configured');
         return;
     }
-    
+
     await bot.sendMessage(msg.chat.id, '🔄 Loading portfolio...');
     
     try {
-        // Get all token accounts
         const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
             wallet.publicKey,
             { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
         );
-        
+
         if (tokenAccounts.value.length === 0) {
-            await bot.sendMessage(msg.chat.id, 
+            await bot.sendMessage(msg.chat.id,
                 `📊 <b>Your Portfolio</b>\n\n` +
                 `No tokens found in wallet.\n` +
                 `Start trading to build your portfolio!`,
@@ -1856,20 +1939,16 @@ bot.onText(/\/portfolio/, async (msg) => {
             );
             return;
         }
-        
-        // Get SOL balance
+
         const solBalance = await getTokenBalance(wallet.publicKey.toString(), CONFIG.WSOL_ADDRESS);
-        
-        // Process each token
+
         const tokens = [];
         for (const account of tokenAccounts.value) {
             const mint = account.account.data.parsed.info.mint;
             const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
-            
+
             if (balance > 0) {
                 const tokenInfo = await getTokenInfo(mint);
-                
-                // Try to get value in SOL
                 let valueInSol = 0;
                 try {
                     const quote = await getJupiterQuote(
@@ -1879,13 +1958,10 @@ bot.onText(/\/portfolio/, async (msg) => {
                         CONFIG.SLIPPAGE_BPS
                     );
                     valueInSol = quote.outAmount / 1e9;
-                } catch (e) {
-                    // If quote fails, token might have no liquidity
-                }
-                
-                // Get P/L data if available
+                } catch (e) {}
+
                 const pl = await calculateProfitLoss(mint);
-                
+
                 tokens.push({
                     mint,
                     symbol: tokenInfo.symbol,
@@ -1896,39 +1972,56 @@ bot.onText(/\/portfolio/, async (msg) => {
                 });
             }
         }
-        
-        // Sort by value
+
         tokens.sort((a, b) => b.valueInSol - a.valueInSol);
-        
-        // Build message
+
         let totalValue = solBalance;
         let message = `📊 <b>Your Portfolio</b>\n\n`;
         message += `💰 <b>SOL:</b> ${solBalance.toFixed(4)}\n\n`;
-        
+
         if (tokens.length > 0) {
             message += `<b>🪙 Tokens:</b>\n`;
             tokens.forEach((token, index) => {
                 totalValue += token.valueInSol;
                 const value = token.valueInSol > 0 ? ` (~${token.valueInSol.toFixed(4)} SOL)` : '';
-                const plText = token.pl ? 
+                const plText = token.pl ?
                     ` ${token.pl.totalPL >= 0 ? '📈' : '📉'} ${token.pl.totalPL >= 0 ? '+' : ''}${token.pl.totalPL.toFixed(4)} SOL` : '';
                 message += `${index + 1}. <b>${token.symbol}</b>: ${formatNumber(token.balance)}${value}${plText}\n`;
-                
-                // Check if trailing stop is active
+
                 if (trailingStopLoss[token.mint]?.enabled) {
                     message += `   🛡️ Trailing stop active at ${trailingStopLoss[token.mint].stopPrice.toFixed(8)} SOL\n`;
                 }
             });
-            
+
             message += `\n💼 <b>Total Portfolio Value:</b> ${totalValue.toFixed(4)} SOL`;
         }
-        
+
         await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
-        
+
     } catch (error) {
         console.error('Error getting portfolio:', error);
         await bot.sendMessage(msg.chat.id, '❌ Error loading portfolio. Please try again.');
     }
+});
+
+
+
+
+bot.onText(/\/autotrade/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: '⚙️ Manual Trade', callback_data: 'auto_trade_manual' },
+                { text: '⚡ Quick Trade (0.0001)', callback_data: 'auto_trade_preset' }
+            ]
+        ]
+    };
+
+    await bot.sendMessage(chatId, "🛠 Choose your trading mode:", {
+        reply_markup: keyboard
+    });
 });
 
 bot.onText(/\/wallet/, async (msg) => {
@@ -2654,3 +2747,68 @@ async function autoCopyTrade(walletAddress, tokenMint) {
         console.error(`❌ Auto copytrade failed for ${tokenMint}: ${err.message}`);
     }
 }
+
+async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
+    const ask = async (text) => {
+        await bot.sendMessage(chatId, text);
+        return new Promise((resolve) => {
+            bot.once('message', (msg) => resolve(msg.text.trim()));
+        });
+    };
+
+    if (!tokenAddress || tokenAddress.length !== 44) {
+        await bot.sendMessage(chatId, "❌ Invalid token address.");
+        return;
+    }
+
+    let solAmount = 0.0001;
+    if (mode === 'manual') {
+        while (true) {
+            const input = await ask("💰 Enter SOL amount to trade:");
+            const value = parseFloat(input);
+            if (!isNaN(value) && value > 0) {
+                solAmount = parseFloat(value.toFixed(6));
+                break;
+            } else {
+                await bot.sendMessage(chatId, "❌ Amount must be > 0 SOL. Try again.");
+            }
+        }
+    }
+
+    let sellPct = 0;
+    while (true) {
+        const input = await ask("📈 Enter profit percentage to sell (e.g., 10 for 10%):");
+        const value = parseFloat(input);
+        if (!isNaN(value) && value > 0) {
+            sellPct = value;
+            break;
+        } else {
+            await bot.sendMessage(chatId, "❌ Invalid profit percentage. Try again.");
+        }
+    }
+
+    let rebuyPct = 0;
+    while (true) {
+        const input = await ask("🔁 Enter price drop percentage to rebuy (e.g., 5 for 5%):");
+        const value = parseFloat(input);
+        if (!isNaN(value) && value > 0 && value < 100) {
+            rebuyPct = value;
+            break;
+        } else {
+            await bot.sendMessage(chatId, "❌ Must be between 0–100%. Try again.");
+        }
+    }
+
+    await buyToken(chatId, tokenAddress, solAmount, sellPct, rebuyPct);
+
+    await bot.sendMessage(chatId,
+        `✅ Trade activated:\n` +
+        `• Token: <code>${tokenAddress}</code>\n` +
+        `• Amount: ${solAmount} SOL\n` +
+        `• Sell Target: +${sellPct}%\n` +
+        `• Rebuy Dip: -${rebuyPct}%`,
+        { parse_mode: 'HTML' }
+    );
+}
+
+
