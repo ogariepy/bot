@@ -329,47 +329,51 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
     await sendTelegramMessage(message);
 
     // Token Transfers — One message per token
-    if (tokenTransfers.length > 0) {
-        for (const transfer of tokenTransfers) {
-            const tokenMint = transfer.mint;
-            const tokenInfo = await getTokenInfo(tokenMint);
-            const analytics = await getTokenAnalytics(tokenMint);
-            const shortMint = shortenAddress(tokenMint);
-            const direction = transfer.direction === 'in' ? '+' : '-';
-            const emoji = transfer.direction === 'in' ? '📥' : '📤';
+if (tokenTransfers.length > 0) {
+    const seenMints = new Set();
 
-            const tokenMessage =
-                `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
-                `👛 Wallet: <b>${walletName}</b>\n` +
-                `<code>${walletAddress}</code>\n\n` +
-                `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
-                `📊 <b>Amount:</b> ${direction}${formatNumber(transfer.amount)}\n` +
-                `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
-                `👥 <b>Holders:</b> ${analytics.holders}\n` +
-                `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
+    for (const transfer of tokenTransfers) {
+        const tokenMint = transfer.mint;
+        if (seenMints.has(tokenMint)) continue;
+        seenMints.add(tokenMint);
 
-            const keyboard = {
-    inline_keyboard: [
-        [
-            { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
-            { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
-        ],
-        [
-            { text: "🤖 Autocopytrade", callback_data: `copy_${tokenMint}` },
-            { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
-        ],
-        [
-            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
-            {text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
-        ]
-    ]
-};
+        const tokenInfo = await getTokenInfo(tokenMint);
+        const analytics = await getTokenAnalytics(tokenMint);
+        const shortMint = shortenAddress(tokenMint);
+        const direction = transfer.direction === 'in' ? '+' : '-';
+        const emoji = transfer.direction === 'in' ? '📥' : '📤';
 
+        const tokenMessage =
+            `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
+            `👛 Wallet: <b>${walletName}</b>\n` +
+            `<code>${walletAddress}</code>\n\n` +
+            `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+            `📊 <b>Amount:</b> ${direction}${formatNumber(transfer.amount)}\n` +
+            `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
+            `👥 <b>Holders:</b> ${analytics.holders}\n` +
+            `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
 
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
+                    { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+                ],
+                [
+                    { text: "🤖 Autocopytrade", callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
+                    { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
+                ],
+                [
+                    { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
+                    { text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
+                ]
+            ]
+        };
 
-            await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
-        }
+        await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
     }
+}
+
 
     // Program interaction summary
     if (programInteractions.length > 0) {
@@ -453,6 +457,7 @@ function analyzeSolTransfers(tx, walletAddress) {
     
     return transfers;
 }
+
 
 // Analyze token transfers in transaction
 function analyzeTokenTransfers(tx, walletAddress) {
@@ -1028,40 +1033,37 @@ async function executeSwap(quoteResponse) {
     }
 }
 
-async function buyToken(walletAddress, tokenMint, solAmount) {
-    const tokenInfo = await getTokenInfo(tokenMint);
-    const analytics = await getTokenAnalytics(tokenMint);
-    const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
-    const shortMint = shortenAddress(tokenMint);
+async function buyToken(tokenMint, solAmount) {
+    try {
+        const quote = await getJupiterQuote(
+            CONFIG.WSOL_ADDRESS,
+            tokenMint,
+            Math.floor(solAmount * 1e9),
+            CONFIG.SLIPPAGE_BPS
+        );
 
-    const message =
-        `✅ BUY ORDER EXECUTED\n\n` +
-        `👛 Wallet: ${walletName}\n` +
-        `${walletAddress}\n` +
-        `💰 Bought: ${solAmount} SOL worth\n` +
-        `🪙 Token: ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
-        `💧 Liquidity: ${formatNumber(analytics.liquidity)}\n` +
-        `👥 Holders: ${analytics.holders}\n` +
-        `🆔 Token: ${tokenMint} (https://dexscreener.com/solana/${tokenMint})`;
+        const txid = await executeSwap(quote);
 
-    const keyboard = {
-        inline_keyboard: [
-            [
-                { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
-                { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
-                { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
-            ],
-            [
-                { text: '📈 Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
-                { text: '📊 Price', callback_data: `price_${tokenMint}` },
-                { text: '💼 Balance', callback_data: `balance_${tokenMint}` }
-            ]
-        ]
-    };
+        const tokenInfo = await getTokenInfo(tokenMint);
+        const decimals = tokenInfo.decimals || 9;
+        const tokenAmount = quote.outAmount / Math.pow(10, decimals);
 
-    await sendTelegramMessage(message, { reply_markup: keyboard });
-    console.log(`✅ Bought ${tokenInfo.symbol} with ${solAmount} SOL from ${walletName}`);
+        recordTrade(tokenMint, 'buy', tokenAmount, solAmount, txid, tokenInfo);
+
+        return {
+            success: true,
+            txid,
+            amount: tokenAmount,
+            tokenInfo
+        };
+
+    } catch (error) {
+        console.error(`❌ buyToken() failed for ${tokenMint}:`, error.message);
+        return { success: false, error: error.message };
+    }
 }
+
+
 
 async function sellToken(walletAddress, tokenMint, tokenAmount) {
     const tokenInfo = await getTokenInfo(tokenMint);
@@ -1216,8 +1218,7 @@ if (data.startsWith("auto_trade_manual_") || data.startsWith("auto_trade_preset_
     return;
 }
 
-
-        if (data.startsWith('autocopytrade_')) {
+if (data.startsWith('autocopytrade_')) {
     const uid = data.split('_')[1];
     const stored = pendingCopytrades.get(uid);
 
@@ -1230,6 +1231,7 @@ if (data.startsWith("auto_trade_manual_") || data.startsWith("auto_trade_preset_
     }
 
     const { walletAddress, tokenMint } = stored;
+    const chatId = callbackQuery.message.chat.id;
 
     try {
         const solAmount = 0.0001;
@@ -1237,61 +1239,53 @@ if (data.startsWith("auto_trade_manual_") || data.startsWith("auto_trade_preset_
         const quote = await getJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
-            solAmount * 1e9,
+            Math.floor(solAmount * 1e9),
             CONFIG.SLIPPAGE_BPS
         );
 
-        const txid = await executeSwap(quote);
+        const txid = await executeSwap(quote); // ← always uses the bot’s wallet
 
+        if (!txid) throw new Error('Swap transaction failed');
+
+        // Enable copytrade tracking
         if (!copytradeEnabled[walletAddress]) copytradeEnabled[walletAddress] = {};
         copytradeEnabled[walletAddress][tokenMint] = true;
 
+        // For display only — this doesn't impact wallet
         const tokenInfo = await getTokenInfo(tokenMint);
         const tokenName = tokenInfo?.symbol || tokenMint;
 
-      const removeId = uuidv4().slice(0, 8);
-pendingCopytrades.set(removeId, { walletAddress, tokenMint });
+        const removeId = uuidv4().slice(0, 8);
+        pendingCopytrades.set(removeId, { walletAddress, tokenMint });
 
-await bot.sendMessage(chatId,
-    `✅ <b>Autocopytrade Successful</b>\n\n` +
-    `👛 <b>Wallet:</b> <code>${walletAddress}</code>\n` +
-    `🪙 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenName}</a>\n` +
-    `💰 Bought: ${solAmount} SOL worth`,
-    {
-        parse_mode: 'HTML',
-        disable_web_page_preview: false,
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    {
-                        text: '❌ Remove Autocopytrade',
-                        callback_data: `remove_copy_${removeId}`
-                    }
-                ]
-            ]
-        }
-    }
-);
-
-        await bot.sendMessage(chatId, `🔚 To stop copytrading this token, click below:`, {
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        {
-                            text: '❌ Remove Autocopytrade',
-                            callback_data: `remove_copytrade_${walletAddress}_${tokenMint}`
-                        }
+        await bot.sendMessage(chatId,
+            `✅ <b>Autocopytrade Successful</b>\n\n` +
+            `👛 <b>Wallet:</b> <code>${walletAddress}</code>\n` +
+            `🪙 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenName}</a>\n` +
+            `💰 Bought: ${solAmount} SOL worth`,
+            {
+                parse_mode: 'HTML',
+                disable_web_page_preview: false,
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            {
+                                text: '❌ Remove Autocopytrade',
+                                callback_data: `remove_copy_${removeId}`
+                            }
+                        ]
                     ]
-                ]
+                }
             }
-        });
+        );
 
         await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autocopytrade successful!' });
+        console.log(`✅ Copied trade: ${walletAddress} → ${tokenMint}`);
+
     } catch (err) {
-        console.error(`❌ Autocopytrade Error: ${err.message}`);
+        console.error(`❌ Autocopytrade failed: ${err.message}`);
         await bot.sendMessage(chatId,
-            `❌ <b>Autocopytrade Failed</b>\n\n` +
-            `Error:\n<code>${err.message}</code>`,
+            `❌ <b>Autocopytrade Failed</b>\n\n<code>${err.message}</code>`,
             { parse_mode: 'HTML' }
         );
         await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autocopytrade failed.' });
@@ -1299,6 +1293,8 @@ await bot.sendMessage(chatId,
 
     return;
 }
+
+
 
 if (data === 'auto_trade_menu') {
     const tradeKeyboard = {
@@ -2646,9 +2642,16 @@ async function autoCopyTrade(walletAddress, tokenMint) {
         const amountSOL = 0.0001;
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
 
-        const quote = await getJupiterQuote(CONFIG.WSOL_ADDRESS, tokenMint, amountSOL * 1e9, CONFIG.SLIPPAGE_BPS);
+        const quote = await getJupiterQuote(
+            CONFIG.WSOL_ADDRESS,
+            tokenMint,
+            Math.floor(amountSOL * 1e9),
+            CONFIG.SLIPPAGE_BPS
+        );
+
         const txid = await executeSwap(quote);
 
+        // Enable copytrade flag for wallet+token
         if (!copytradeEnabled[walletAddress]) {
             copytradeEnabled[walletAddress] = {};
         }
@@ -2661,7 +2664,7 @@ async function autoCopyTrade(walletAddress, tokenMint) {
             `✅ <b>Successful Auto Copy Trade</b>\n\n` +
             `👛 Wallet: ${walletName}\n` +
             `🪙 Token: <code>${tokenMint}</code>\n` +
-            `💰 Amount: 0.001 SOL\n` +
+            `💰 Amount: ${amountSOL} SOL\n` +
             `🔗 <a href="${tokenLink}">View Token</a>\n` +
             `🧾 <a href="${txLink}">Transaction</a>`;
 
@@ -2684,8 +2687,10 @@ async function autoCopyTrade(walletAddress, tokenMint) {
         console.log(`✅ Auto copytrade successful for ${walletName}: ${tokenMint}`);
     } catch (err) {
         console.error(`❌ Auto copytrade failed for ${tokenMint}: ${err.message}`);
+        await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `❌ Auto copytrade failed: ${err.message}`);
     }
 }
+
 
 async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
     const ask = async (text) => {
@@ -2738,7 +2743,14 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
         }
     }
 
-    await buyToken(chatId, tokenAddress, solAmount, sellPct, rebuyPct);
+    const result = await buyToken(tokenAddress, solAmount);
+    if (!result.success) {
+    await bot.sendMessage(chatId, `❌ Buy failed: ${result.error}`);
+    return;
+}
+
+
+
 
     await bot.sendMessage(chatId,
         `✅ Trade activated:\n` +
