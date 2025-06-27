@@ -353,22 +353,30 @@ if (tokenTransfers.length > 0) {
             `👥 <b>Holders:</b> ${analytics.holders}\n` +
             `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
 
-        const keyboard = {
-            inline_keyboard: [
-                [
-                    { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
-                    { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
-                ],
-                [
-                    { text: "🤖 Autocopytrade", callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
-                    { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
-                ],
-                [
-                    { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
-                    { text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
-                ]
-            ]
-        };
+       const keyboard = {
+    inline_keyboard: [
+        [
+            { text: "💰 Buy 0.001", callback_data: `buy_0.001_${tokenMint}` },
+            { text: "💰 Buy 0.01", callback_data: `buy_0.01_${tokenMint}` }
+        ],
+        [
+            { text: "💰 Buy 0.05", callback_data: `buy_0.1_${tokenMint}` },
+            { text: "💰 Buy 0.1", callback_data: `buy_1_${tokenMint}` }
+        ],
+        [
+            { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+        ],
+        [
+            { text: "🤖 Autocopytrade", callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
+            { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
+        ],
+        [
+            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
+            { text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
+        ]
+    ]
+};
 
         await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
     }
@@ -1160,6 +1168,61 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     return;
 }
+
+if (data.startsWith('buy')) {
+    const parts = data.split('_');
+    const amount = parseFloat(parts[1]);
+    const tokenMint = parts.slice(2).join('_');
+
+    const tradeCheck = canTrade(userId, amount);
+    if (!tradeCheck.allowed) {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: tradeCheck.reason,
+            show_alert: true
+        });
+        return;
+    }
+
+    await bot.answerCallbackQuery(callbackQuery.id, {
+        text: `Buying ${amount} SOL of token...`
+    });
+
+    const walletBalance = await getTokenBalance(wallet.publicKey.toString(), CONFIG.WSOL_ADDRESS);
+
+    if (walletBalance < amount + 0.01) {
+        await bot.sendMessage(chatId,
+            `❌ Insufficient balance!\n\nWallet has ${walletBalance.toFixed(4)} SOL\nNeeded: ${(amount + 0.01).toFixed(4)} SOL (including fees)`,
+            { parse_mode: 'HTML' }
+        );
+        return;
+    }
+
+    const result = await buyToken(tokenMint, amount);
+
+    if (result.success) {
+        const today = new Date().toDateString();
+        if (!dailyUsage[today]) dailyUsage[today] = {};
+        if (!dailyUsage[today][userId]) dailyUsage[today][userId] = 0;
+        dailyUsage[today][userId] += amount;
+
+        await bot.sendMessage(chatId,
+            `✅ <b>Token bought successfully</b>\n\n` +
+            `🪙 Token: ${result.tokenInfo.symbol || tokenMint}\n` +
+            `💰 Spent: ${amount} SOL\n` +
+            `📦 Received: ${formatNumber(result.amount)} tokens\n` +
+            `🔗 <a href="https://solscan.io/tx/${result.txid}">View Transaction</a>`,
+            { parse_mode: 'HTML', disable_web_page_preview: true }
+        );
+    } else {
+        await bot.sendMessage(chatId,
+            `❌ <b>Buy failed</b>\n\nError: ${result.error}`,
+            { parse_mode: 'HTML' }
+        );
+    }
+
+    return;
+}
+
 
 if (data.startsWith('multi_dex_')) {
     const tokenMint = data.replace('multi_dex_', '');
