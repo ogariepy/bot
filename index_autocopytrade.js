@@ -359,7 +359,8 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
             { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
         ],
         [
-            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` }
+            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
+            {text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
         ]
     ]
 };
@@ -1158,6 +1159,32 @@ bot.on('callback_query', async (callbackQuery) => {
     return;
 }
 
+if (data.startsWith('multi_dex_')) {
+    const tokenMint = data.replace('multi_dex_', '');
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: "🔁 Raydium", url: `https://raydium.io/swap/?inputCurrency=sol&outputCurrency=${tokenMint}` },
+                { text: "🐳 Orca", url: `https://www.orca.so/token/${tokenMint}` }
+            ],
+            [
+                { text: "🌊 Meteora", url: `https://app.meteora.ag/swap?outputMint=${tokenMint}` },
+                { text: "⚛️ Photon", url: `https://photon.art/swap/${tokenMint}` }
+            ]
+        ]
+    };
+
+    await bot.sendMessage(chatId,
+        `🌐 <b>Multi-DEX Links</b>\n\nToken Mint:\n<code>${tokenMint}</code>`,
+        { parse_mode: 'HTML', reply_markup: keyboard }
+    );
+
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+
+
 // STEP 1: Show trading mode options
 if (data.startsWith("auto_trade_token_")) {
     const tokenAddress = data.replace("auto_trade_token_", "");
@@ -1297,13 +1324,43 @@ if (data === 'auto_trade_manual' || data === 'auto_trade_preset') {
 }
 
 
-
-
-if (data === 'portfolio') {
+if (data === 'cmd_portfolio') {
     await bot.answerCallbackQuery(callbackQuery.id);
     await handlePortfolioCommand(chatId);
     return;
 }
+
+
+
+
+if (data === 'cmd_pl') {
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await handlePLCommand(chatId);
+    return;
+}
+
+
+if (data === 'cmd_alerts') {
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await handleAlertsCommand(chatId);
+    return;
+}
+
+
+if (data === 'multi_dex_global') {
+    const defaultToken = 'So11111111111111111111111111111111111111112'; // WSOL or placeholder
+    await sendMultiDexLinks(chatId, defaultToken);
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+if (data === 'social_global') {
+    await sendGlobalNewsLinks(chatId);
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+
 
         // Handle blacklist token
         if (data.startsWith('blacklist_')) {
@@ -1713,18 +1770,19 @@ bot.onText(/\/start/, async (msg) => {
     const keyboard = {
         inline_keyboard: [
             [
-                { text: '💼 Portfolio', callback_data: 'cmd_portfolio' },
-                { text: '📊 P/L Report', callback_data: 'cmd_pl' },
+                { text: "📊 Portfolio", callback_data: "cmd_portfolio" }
+,               { text: "📈 P/L Report", callback_data: "cmd_pl" },
             ],
             [
                 { text: "🛠 Autotrade", callback_data: "auto_trade_menu" }
             ],
             [
-                { text: '💹 Price Alerts', callback_data: 'cmd_alerts' },
+                { text: "🔔 Price Alerts", callback_data: "cmd_alerts" },
                 { text: '🔄 Copytrade', callback_data: 'cmd_copytrade' },
             ],
             [
                 { text: tradingPaused ? '▶️ Resume Trading' : '⏸️ Pause Trading', callback_data: 'pause_trading' },
+                { text: '📢 Social Media Monitor', callback_data: 'social_global' }
             ],
             [
                 { text: '🔄 Refresh', callback_data: 'cmd_start' }
@@ -1780,6 +1838,16 @@ bot.onText(/\/filters/, async (msg) => {
     await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
 });
 
+bot.onText(/\/pl/, async (msg) => {
+    await handlePLCommand(msg.chat.id);
+});
+
+bot.onText(/\/alerts/, async (msg) => {
+    await handleAlertsCommand(msg.chat.id);
+});
+
+
+
 bot.onText(/\/blacklist/, async (msg) => {
     const count = blacklistedTokens.size;
     
@@ -1834,53 +1902,7 @@ bot.onText(/\/stats/, async (msg) => {
     await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
 });
 
-bot.onText(/\/pl/, async (msg) => {
-    const chatId = msg.chat.id;
-    
-    if (Object.keys(tradeHistory).length === 0) {
-        await bot.sendMessage(chatId, 
-            `📊 <b>No Trading History</b>\n\n` +
-            `Start trading to see your profit/loss report!`,
-            { parse_mode: 'HTML' }
-        );
-        return;
-    }
-    
-    let totalPL = 0;
-    let totalInvested = 0;
-    let totalRealized = 0;
-    let message = `📊 <b>Overall P/L Report</b>\n\n`;
-    
-    for (const [tokenMint, history] of Object.entries(tradeHistory)) {
-        const tokenInfo = await getTokenInfo(tokenMint);
-        const pl = await calculateProfitLoss(tokenMint);
-        
-        if (pl) {
-            totalPL += pl.totalPL;
-            totalInvested += pl.totalInvested;
-            totalRealized += pl.totalRealized;
-            
-            const plEmoji = pl.totalPL >= 0 ? '📈' : '📉';
-            const plPercentage = pl.totalInvested > 0 ? 
-                ((pl.totalPL / pl.totalInvested) * 100).toFixed(2) : 0;
-            
-            message += `${plEmoji} <b>${tokenInfo.symbol || history.symbol}</b>\n`;
-            message += `• P/L: ${pl.totalPL >= 0 ? '+' : ''}${pl.totalPL.toFixed(4)} SOL (${plPercentage}%)\n`;
-            message += `• Balance: ${formatNumber(pl.currentBalance)} tokens\n\n`;
-        }
-    }
-    
-    const overallPercentage = totalInvested > 0 ? 
-        ((totalPL / totalInvested) * 100).toFixed(2) : 0;
-    
-    message = `📊 <b>Overall P/L Summary</b>\n\n` +
-        `💰 <b>Total P/L: ${totalPL >= 0 ? '+' : ''}${totalPL.toFixed(4)} SOL (${overallPercentage}%)</b>\n` +
-        `• Total Invested: ${totalInvested.toFixed(4)} SOL\n` +
-        `• Total Realized: ${totalRealized.toFixed(4)} SOL\n\n` +
-        message;
-    
-    await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
-});
+ 
 
 bot.onText(/\/copytrade/, async (msg) => {
     const chatId = msg.chat.id;
@@ -1917,92 +1939,9 @@ bot.onText(/\/copytrade/, async (msg) => {
 
 
 bot.onText(/\/portfolio/, async (msg) => {
-    if (!wallet) {
-        await bot.sendMessage(msg.chat.id, '❌ No trading wallet configured');
-        return;
-    }
-
-    await bot.sendMessage(msg.chat.id, '🔄 Loading portfolio...');
-    
-    try {
-        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
-            wallet.publicKey,
-            { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
-        );
-
-        if (tokenAccounts.value.length === 0) {
-            await bot.sendMessage(msg.chat.id,
-                `📊 <b>Your Portfolio</b>\n\n` +
-                `No tokens found in wallet.\n` +
-                `Start trading to build your portfolio!`,
-                { parse_mode: 'HTML' }
-            );
-            return;
-        }
-
-        const solBalance = await getTokenBalance(wallet.publicKey.toString(), CONFIG.WSOL_ADDRESS);
-
-        const tokens = [];
-        for (const account of tokenAccounts.value) {
-            const mint = account.account.data.parsed.info.mint;
-            const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
-
-            if (balance > 0) {
-                const tokenInfo = await getTokenInfo(mint);
-                let valueInSol = 0;
-                try {
-                    const quote = await getJupiterQuote(
-                        mint,
-                        CONFIG.WSOL_ADDRESS,
-                        Math.floor(balance * Math.pow(10, tokenInfo.decimals)),
-                        CONFIG.SLIPPAGE_BPS
-                    );
-                    valueInSol = quote.outAmount / 1e9;
-                } catch (e) {}
-
-                const pl = await calculateProfitLoss(mint);
-
-                tokens.push({
-                    mint,
-                    symbol: tokenInfo.symbol,
-                    name: tokenInfo.name,
-                    balance,
-                    valueInSol,
-                    pl: pl
-                });
-            }
-        }
-
-        tokens.sort((a, b) => b.valueInSol - a.valueInSol);
-
-        let totalValue = solBalance;
-        let message = `📊 <b>Your Portfolio</b>\n\n`;
-        message += `💰 <b>SOL:</b> ${solBalance.toFixed(4)}\n\n`;
-
-        if (tokens.length > 0) {
-            message += `<b>🪙 Tokens:</b>\n`;
-            tokens.forEach((token, index) => {
-                totalValue += token.valueInSol;
-                const value = token.valueInSol > 0 ? ` (~${token.valueInSol.toFixed(4)} SOL)` : '';
-                const plText = token.pl ?
-                    ` ${token.pl.totalPL >= 0 ? '📈' : '📉'} ${token.pl.totalPL >= 0 ? '+' : ''}${token.pl.totalPL.toFixed(4)} SOL` : '';
-                message += `${index + 1}. <b>${token.symbol}</b>: ${formatNumber(token.balance)}${value}${plText}\n`;
-
-                if (trailingStopLoss[token.mint]?.enabled) {
-                    message += `   🛡️ Trailing stop active at ${trailingStopLoss[token.mint].stopPrice.toFixed(8)} SOL\n`;
-                }
-            });
-
-            message += `\n💼 <b>Total Portfolio Value:</b> ${totalValue.toFixed(4)} SOL`;
-        }
-
-        await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
-
-    } catch (error) {
-        console.error('Error getting portfolio:', error);
-        await bot.sendMessage(msg.chat.id, '❌ Error loading portfolio. Please try again.');
-    }
+    await handlePortfolioCommand(msg.chat.id);
 });
+
 
 
 
@@ -2522,8 +2461,8 @@ async function monitorPositions() {
 }
 // ====== HELPER FUNCTIONS ======
 function shortenAddress(address) {
-    if (!address || address.length < 10) return address;
-    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    const str = typeof address === 'string' ? address : address.toString();
+    return str.slice(0, 4) + '...' + str.slice(-4);
 }
 
 function formatNumber(num) {
@@ -2812,3 +2751,200 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
 }
 
 
+
+
+async function handlePortfolioCommand(chatId) {
+    if (!wallet) {
+        await bot.sendMessage(chatId, '❌ No trading wallet configured');
+        return;
+    }
+
+    await bot.sendMessage(chatId, '🔄 Loading portfolio...');
+    
+    try {
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+            wallet.publicKey,
+            { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+        );
+
+        if (tokenAccounts.value.length === 0) {
+            await bot.sendMessage(chatId,
+                `📊 <b>Your Portfolio</b>\n\n` +
+                `No tokens found in wallet.\n` +
+                `Start trading to build your portfolio!`,
+                { parse_mode: 'HTML' }
+            );
+            return;
+        }
+
+        const solBalance = await getTokenBalance(wallet.publicKey.toString(), CONFIG.WSOL_ADDRESS);
+
+        const tokens = [];
+        for (const account of tokenAccounts.value) {
+            const mint = account.account.data.parsed.info.mint;
+            const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
+
+            if (balance > 0) {
+                const tokenInfo = await getTokenInfo(mint);
+                let valueInSol = 0;
+                try {
+                    const quote = await getJupiterQuote(
+                        mint,
+                        CONFIG.WSOL_ADDRESS,
+                        Math.floor(balance * Math.pow(10, tokenInfo.decimals)),
+                        CONFIG.SLIPPAGE_BPS
+                    );
+                    valueInSol = quote.outAmount / 1e9;
+                } catch (e) {}
+
+                const pl = await calculateProfitLoss(mint);
+
+                tokens.push({
+                    mint,
+                    symbol: tokenInfo.symbol,
+                    name: tokenInfo.name,
+                    balance,
+                    valueInSol,
+                    pl: pl
+                });
+            }
+        }
+
+        tokens.sort((a, b) => b.valueInSol - a.valueInSol);
+
+        let totalValue = solBalance;
+        let message = `📊 <b>Your Portfolio</b>\n\n`;
+        message += `💰 <b>SOL:</b> ${solBalance.toFixed(4)}\n\n`;
+
+        if (tokens.length > 0) {
+            message += `<b>🪙 Tokens:</b>\n`;
+            tokens.forEach((token, index) => {
+                totalValue += token.valueInSol;
+                const value = token.valueInSol > 0 ? ` (~${token.valueInSol.toFixed(4)} SOL)` : '';
+                const plText = token.pl ? 
+                    ` ${token.pl.totalPL >= 0 ? '📈' : '📉'} ${token.pl.totalPL >= 0 ? '+' : ''}${token.pl.totalPL.toFixed(4)} SOL` : '';
+                message += `${index + 1}. <b>${token.symbol}</b>: ${formatNumber(token.balance)}${value}${plText}\n`;
+
+                if (trailingStopLoss[token.mint]?.enabled) {
+                    message += `   🛡️ Trailing stop active at ${trailingStopLoss[token.mint].stopPrice.toFixed(8)} SOL\n`;
+                }
+            });
+
+            message += `\n💼 <b>Total Portfolio Value:</b> ${totalValue.toFixed(4)} SOL`;
+        }
+
+        await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+
+    } catch (error) {
+        console.error('Error getting portfolio:', error);
+        await bot.sendMessage(chatId, '❌ Error loading portfolio. Please try again.');
+    }
+}
+
+
+async function handlePLCommand(chatId) {
+    if (Object.keys(tradeHistory).length === 0) {
+        await bot.sendMessage(chatId, 
+            `📊 <b>No Trading History</b>\n\n` +
+            `Start trading to see your profit/loss report!`,
+            { parse_mode: 'HTML' }
+        );
+        return;
+    }
+    
+    let totalPL = 0;
+    let totalInvested = 0;
+    let totalRealized = 0;
+    let message = `📊 <b>Overall P/L Report</b>\n\n`;
+    
+    for (const [tokenMint, history] of Object.entries(tradeHistory)) {
+        const tokenInfo = await getTokenInfo(tokenMint);
+        const pl = await calculateProfitLoss(tokenMint);
+        
+        if (pl) {
+            totalPL += pl.totalPL;
+            totalInvested += pl.totalInvested;
+            totalRealized += pl.totalRealized;
+            
+            const plEmoji = pl.totalPL >= 0 ? '📈' : '📉';
+            const plPercentage = pl.totalInvested > 0 ? 
+                ((pl.totalPL / pl.totalInvested) * 100).toFixed(2) : 0;
+            
+            message += `${plEmoji} <b>${tokenInfo.symbol || history.symbol}</b>\n`;
+            message += `• P/L: ${pl.totalPL >= 0 ? '+' : ''}${pl.totalPL.toFixed(4)} SOL (${plPercentage}%)\n`;
+            message += `• Balance: ${formatNumber(pl.currentBalance)} tokens\n\n`;
+        }
+    }
+    
+    const overallPercentage = totalInvested > 0 ? 
+        ((totalPL / totalInvested) * 100).toFixed(2) : 0;
+    
+    message = `📊 <b>Overall P/L Summary</b>\n\n` +
+        `💰 <b>Total P/L: ${totalPL >= 0 ? '+' : ''}${totalPL.toFixed(4)} SOL (${overallPercentage}%)</b>\n` +
+        `• Total Invested: ${totalInvested.toFixed(4)} SOL\n` +
+        `• Total Realized: ${totalRealized.toFixed(4)} SOL\n\n` +
+        message;
+    
+    await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+}
+
+
+async function handleAlertsCommand(chatId) {
+    const alerts = userAlerts[chatId];
+
+    if (!alerts || alerts.length === 0) {
+        await bot.sendMessage(chatId, "🔕 You have no active price alerts.");
+        return;
+    }
+
+    let message = `🔔 <b>Your Price Alerts</b>\n\n`;
+
+    alerts.forEach((alert, index) => {
+        const createdAt = new Date(alert.createdAt);
+        const dateStr = createdAt.toLocaleDateString("en-GB");
+        message += `${index + 1}. <b>${alert.token}</b>\n`;
+        message += `   📉 Target: $${alert.targetPrice.toFixed(2)}\n`;
+        message += `   📅 Created: ${dateStr}\n\n`;
+    });
+
+    await bot.sendMessage(chatId, message, { parse_mode: "HTML" });
+}
+
+
+async function sendGlobalNewsLinks(chatId) {
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: "📰 CoinDesk", url: "https://www.coindesk.com/" },
+                { text: "🌍 U.Today", url: "https://u.today/" }
+            ],
+            [
+                { text: "🚀 CoinGape", url: "https://coingape.com/" },
+                { text: "🧠 Decrypt", url: "https://decrypt.co/" }
+            ],
+            [
+                { text: "📩 Bankless", url: "https://banklesshq.com/" },
+                { text: "🌐 BeInCrypto", url: "https://beincrypto.com/" }
+            ],
+            [
+                { text: "📊 The Block", url: "https://www.theblock.co/" },
+                { text: "⚡ Bitcoin Mag", url: "https://bitcoinmagazine.com/" }
+            ],
+            [
+                { text: "📚 Coin Bureau", url: "https://www.coinbureau.com/" },
+                { text: "💧 The Defiant", url: "https://thedefiant.io/" }
+            ],
+            [
+                { text: "👥 Reddit: r/Crypto", url: "https://www.reddit.com/r/CryptoCurrency/" },
+                { text: "🐦 Twitter Crypto", url: "https://twitter.com/search?q=crypto&src=typed_query" }
+            ]
+        ]
+    };
+
+    const message = `📢 <b>Crypto News & Social Monitoring</b>\n\nStay ahead with real-time updates, analysis, and trends from trusted outlets and community hubs.`;
+
+    await bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard
+    });
+}
