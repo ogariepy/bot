@@ -336,6 +336,10 @@ if (tokenTransfers.length > 0) {
 
     for (const transfer of tokenTransfers) {
         const tokenMint = transfer.mint;
+        
+        // 🚫 Skip Wrapped SOL transactions
+        if (tokenMint === 'So11111111111111111111111111111111111111112') continue;
+
         if (seenMints.has(tokenMint)) continue;
         seenMints.add(tokenMint);
 
@@ -2408,52 +2412,52 @@ async function passesTradeFilters(tokenMint, amount = CONFIG.COPYTRADE_AMOUNT_SO
 
 // Get token analytics (liquidity, holders, etc)
 async function getTokenAnalytics(tokenMint) {
-    // Check cache first
+    // Cache for 5 minutes
     if (tokenAnalytics[tokenMint] && 
-        tokenAnalytics[tokenMint].timestamp > Date.now() - 300000) { // 5 min cache
+        tokenAnalytics[tokenMint].timestamp > Date.now() - 300000) {
         return tokenAnalytics[tokenMint];
     }
-    
+
     try {
-        // This is a simplified version - in production you'd use DEX APIs
-        // For now, we'll estimate based on available data
-        const tokenInfo = await getTokenInfo(tokenMint);
-        
-        // Try to get some basic metrics
-        let liquidity = 10000; // Default $10k
-        let marketCap = 50000; // Default $50k
-        let holders = 100; // Default 100 holders
-        
-        // You can enhance this with real API calls to:
-        // - DexScreener API
-        // - Birdeye API
-        // - HelloMoon API
-        
+        // Use search API instead of exact mint API
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${tokenMint}`);
+        if (!res.ok) throw new Error(`Dexscreener search failed: ${res.status}`);
+
+        const result = await res.json();
+        const pair = result.pairs?.[0];
+
+        if (!pair) throw new Error('No token match found on Dexscreener');
+
         const analytics = {
             tokenMint,
-            symbol: tokenInfo.symbol,
-            liquidity,
-            marketCap,
-            holders,
+            symbol: pair.baseToken?.symbol || '',
+            liquidity: Number(pair.liquidity?.usd) || 0,
+            volume24h: Number(pair.volume?.h24) || 0,
+            holders: 0, // still not available here
+            priceChange24h: parseFloat(pair.priceChange?.h24 || 0),
+            timestamp: Date.now()
+        };
+
+        tokenAnalytics[tokenMint] = analytics;
+        return analytics;
+
+    } catch (err) {
+        console.error(`❌ Dexscreener fetch failed for ${tokenMint}: ${err.message}`);
+        return {
+            tokenMint,
+            symbol: '',
+            liquidity: 0,
             volume24h: 0,
+            holders: 0,
             priceChange24h: 0,
             timestamp: Date.now()
         };
-        
-        tokenAnalytics[tokenMint] = analytics;
-        return analytics;
-        
-    } catch (error) {
-        console.error('Error getting token analytics:', error);
-        return {
-            liquidity: 0,
-            marketCap: 0,
-            holders: 0,
-            volume24h: 0,
-            priceChange24h: 0
-        };
     }
 }
+
+
+
+
 
 // Update trailing stop loss
 async function updateTrailingStopLoss(tokenMint) {
