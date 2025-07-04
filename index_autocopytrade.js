@@ -1,23 +1,33 @@
 require('dotenv').config();
+const fs = require('fs'); // ✅ Only declare once, here
+const path = require('path');
 const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
-const { 
-    Connection, 
-    Keypair, 
-    PublicKey, 
-    Transaction,
-    VersionedTransaction 
-} = require('@solana/web3.js');
-const bs58 = require('bs58');
 const fetch = require('node-fetch');
 const WebSocket = require('ws');
-const fs = require('fs');
-const path = require('path');
+const bs58 = require('bs58');
 const { v4: uuidv4 } = require('uuid');
+const web3 = require('@solana/web3.js');
+const {
+    Connection,
+    Keypair,
+    PublicKey,
+    Transaction,
+    VersionedTransaction
+} = require('@solana/web3.js');
+
+// Custom logic
 const pendingCopytrades = new Map(); // uid -> { walletAddress, tokenMint }
 const autotradeTargets = {};
 const userState = {};
-const web3 = require('@solana/web3.js');
+const GLOBAL_STOPLOSS = {
+    enabled: false,
+    percent: 30 // default stop loss at 30%
+};
+
+
+
+
 
 
 // Define HELIUS_API_KEY before using it in CONFIG
@@ -1468,6 +1478,149 @@ if (data.startsWith('autocopytrade_')) {
     return;
 }
 
+if (data === 'show_recent_trades') {
+    const now = Date.now();
+    const history = loadTradeMemory();
+
+    const recent = history
+        .filter(t => now - t.timestamp < 3 * 60 * 60 * 1000)
+        .slice(-10);
+
+    if (!recent.length) {
+        await bot.sendMessage(chatId, '📭 No trades in the last 3h.');
+    } else {
+        let msg = `<b>📜 Recent Trades (last 3h)</b>\n\n`;
+        for (const trade of recent) {
+            const ageMin = Math.floor((now - trade.timestamp) / 60000);
+            const tokenLink = `https://dexscreener.com/solana/${trade.token}`;
+            msg += `🔁 <b>${trade.type.toUpperCase()}</b> - <a href="${tokenLink}">${trade.token.slice(0, 6)}...</a>\n`;
+            msg += `👛 ${shortenAddress(trade.wallet)} | ${ageMin} min ago\n\n`;
+        }
+
+        await bot.sendMessage(chatId, msg, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: false
+        });
+    }
+
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+
+
+if (data === 'scan_memes') {
+  try {
+    const res = await fetch('https://api.dexscreener.com/token-boosts/latest/v1');
+    const tokens = await res.json();
+
+    const memes = tokens
+      .filter(t => t.chainId === 'solana')
+      .filter(t => t.header?.toLowerCase().match(/doge|bonk|pepe|cat|elon|meme|floki|inu/))
+      .slice(0, 5);
+
+    if (memes.length === 0) {
+      await bot.sendMessage(chatId, "🧪 No boosted meme tokens found.");
+    } else {
+      let msg = `🚀 <b>Boosted Meme Tokens</b>\n\n`;
+      for (const t of memes) {
+        msg += `🪙 <a href="${t.url}">${t.header}</a>\n`;
+        msg += `🌐 ${t.chainId}\n\n`;
+      }
+      await bot.sendMessage(chatId, msg, { parse_mode: 'HTML', disable_web_page_preview: false });
+    }
+
+  } catch (err) {
+    console.error("❌ Meme scanner failed:", err.message);
+    await bot.sendMessage(chatId, "❌ Failed to scan trending meme tokens.");
+  }
+
+  await bot.answerCallbackQuery(callbackQuery.id);
+  return;
+}
+
+
+
+
+if (data === 'show_trending') {
+    try {
+        const trackedTokens = [
+            "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E", // USDT
+            "Es9vMFrzdRgK7U8qF8efFt3fVsAeGz8CC2fBafnXzC5E", // USDC
+            "4k3Dyjzvzp8eGZzU7nNyqGHTrp44xh6tjkTv3SzcHkMF", // RAY
+            "DUw3ECw1U2QknAQ7GE22tmdPX93YXg2ZYwAfWHmXYDKa", // Bonk
+            "7MBjK7NVy3ZyzEZ5j5Tc6KPK1ZEXW3c9dLw3bcCcuVyd"  // Random meme
+        ];
+
+        const results = [];
+
+        for (const token of trackedTokens) {
+            const res = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${token}`);
+            const json = await res.json();
+            const pair = json.pairs?.[0];
+            if (!pair) continue;
+
+            results.push({
+                symbol: pair.baseToken.symbol,
+                change: pair.priceChange?.h24 || 0,
+                liquidity: pair.liquidity?.usd || 0,
+                volume: pair.volume?.h24 || 0,
+                url: `https://dexscreener.com/solana/${pair.pairAddress}`
+            });
+        }
+
+        results.sort((a, b) => b.change - a.change);
+        const top = results.slice(0, 5);
+
+        let msg = `📈 <b>Top Gainers (24h)</b>\n\n`;
+        for (const token of top) {
+            msg += `🪙 <a href="${token.url}">${token.symbol}</a>\n`;
+            msg += `📈 +${token.change.toFixed(2)}%\n`;
+            msg += `💧 $${Math.floor(token.liquidity)} | Vol: $${Math.floor(token.volume)}\n\n`;
+        }
+
+        await bot.sendMessage(chatId, msg, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: false
+        });
+
+    } catch (err) {
+        console.error('Trending fetch failed:', err.message);
+        await bot.sendMessage(chatId, '❌ Failed to load trending tokens.');
+    }
+
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+
+
+if (data === 'show_risk') {
+    const filters = COPYTRADE_FILTERS;
+    const msg =
+        `🧠 <b>Risk Filter Settings</b>\n\n` +
+        `• 💧 Min Liquidity: <b>$${filters.minLiquidity}</b>\n` +
+        `• 👥 Min Holders: <b>${filters.minHolders}</b>\n` +
+        `• 📈 Min 24h Volume: <b>$${filters.minVolume}</b>\n\n` +
+        `Use /setfilter to modify these.`;
+
+    await bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
+
+if (data === 'stoploss_menu') {
+    const status = GLOBAL_STOPLOSS.enabled ? '✅ Enabled' : '❌ Disabled';
+    const msg =
+        `🛡️ <b>Global Stop Loss</b>\n\n` +
+        `• Status: ${status}\n` +
+        `• Threshold: <b>${GLOBAL_STOPLOSS.percent}%</b>\n\n` +
+        `Use /stoploss [on/off] [percent]`;
+
+    await bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+    await bot.answerCallbackQuery(callbackQuery.id);
+    return;
+}
 
 
 if (data === 'show_copytrades') {
@@ -1551,6 +1704,8 @@ if (data === 'cmd_portfolio') {
     await handlePortfolioCommand(chatId);
     return;
 }
+
+
 
 
 
@@ -2041,7 +2196,7 @@ bot.onText(/\/start/, async (msg) => {
 ,               { text: "📈 P/L Report", callback_data: "cmd_pl" },
             ],
             [
-                { text: "🛠 Autotrade", callback_data: "auto_trade_menu" }
+                { text: '📜 Recent Trades (3h)', callback_data: 'show_recent_trades' }
             ],
             [
                 { text: "🔔 Price Alerts", callback_data: "cmd_alerts" },
@@ -2052,8 +2207,16 @@ bot.onText(/\/start/, async (msg) => {
                 { text: '📢 Social Media Monitor', callback_data: 'social_global' }
             ],
             [
-                { text: '🔄 Refresh', callback_data: 'cmd_start' },
+                { text: "📈 Trending", callback_data: "show_trending" },
+                { text: "🧠 Risk Filters", callback_data: "show_risk" }
+            ],
+            [
+                { text: "🛡️ Stop Loss", callback_data: "stoploss_menu" },
                 { text: '📋 Ongoing Copytrades', callback_data: 'show_copytrades' }
+            ],
+            [
+                { text: "🚀 Trending Meme Boosts", callback_data: "scan_memes" },
+                { text: '🔄 Refresh', callback_data: 'cmd_start' }
             ]
         ]
     };
@@ -2114,6 +2277,28 @@ bot.onText(/\/alerts/, async (msg) => {
     await handleAlertsCommand(msg.chat.id);
 });
 
+bot.onText(/\/stoploss (on|off) ?([\d.]*)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const enabled = match[1] === 'on';
+    const percent = parseFloat(match[2]) || GLOBAL_STOPLOSS.percent;
+
+    GLOBAL_STOPLOSS.enabled = enabled;
+    GLOBAL_STOPLOSS.percent = percent;
+
+    await bot.sendMessage(chatId, `🛡️ Global Stop Loss ${enabled ? 'enabled' : 'disabled'} at ${percent}%`);
+});
+
+bot.onText(/\/setfilter (\w+) (\d+)/, async (msg, match) => {
+    const [_, key, value] = match;
+    const chatId = msg.chat.id;
+
+    if (!['minLiquidity', 'minHolders', 'minVolume'].includes(key)) {
+        return bot.sendMessage(chatId, `❌ Invalid filter key. Use minLiquidity, minHolders, or minVolume.`);
+    }
+
+    COPYTRADE_FILTERS[key] = Number(value);
+    await bot.sendMessage(chatId, `✅ Updated ${key} to ${value}`);
+});
 
 
 bot.onText(/\/blacklist/, async (msg) => {
@@ -2509,57 +2694,73 @@ async function updateTrailingStopLoss(tokenMint) {
 async function checkProfitTargets(tokenMint) {
     const position = tradeHistory[tokenMint];
     if (!position || position.totalBought <= position.totalSold) return;
-    
+
     const currentPrice = await getTokenPrice(tokenMint);
     if (!currentPrice || !position.averageBuyPrice) return;
-    
+
     const profitPercent = ((currentPrice - position.averageBuyPrice) / position.averageBuyPrice) * 100;
-    
-    // Check each profit target
+
     for (const [target, config] of Object.entries(PROFIT_TARGETS)) {
         const targetPercent = parseFloat(target);
-        
-        // Check if we've hit this target and haven't executed it yet
+
         if (profitPercent >= targetPercent && !position[`target${target}Hit`]) {
             position[`target${target}Hit`] = true;
-            
+
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
             const sellAmount = balance * (config.sell / 100);
-            
-            if (sellAmount > 0) {
-                console.log(`🎯 Profit target ${target}% hit for ${tokenMint}! Selling ${config.sell}%`);
-                
-                const tokenInfo = await getTokenInfo(tokenMint);
-                await sendTelegramMessage(
-                    `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
-                    `Token: ${tokenInfo.symbol}\n` +
-                    `Profit: +${profitPercent.toFixed(2)}%\n` +
-                    `Target: ${target}%\n` +
-                    `Action: Selling ${config.sell}% of position\n\n` +
-                    `Executing trade...`,
-                    { parse_mode: 'HTML' }
-                );
-                
-                // Execute partial sell
-                await sellToken(tokenMint, sellAmount);
-                
-                // Enable trailing stop if configured
-                if (config.trailing && !trailingStopLoss[tokenMint]) {
-                    trailingStopLoss[tokenMint] = {
-                        enabled: true,
-                        highestPrice: currentPrice,
-                        stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
-                        activatedAt: Date.now()
-                    };
-                    saveTrailingStops();
-                    console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
-                }
+            if (sellAmount <= 0) return;
+
+            console.log(`🎯 Profit target ${target}% hit for ${tokenMint}! Selling ${config.sell}%`);
+
+            const tokenInfo = await getTokenInfo(tokenMint);
+            const symbol = tokenInfo?.symbol || tokenMint.slice(0, 4) + '...' + tokenMint.slice(-4);
+            const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
+
+            const message =
+                `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
+                `🪙 Token: <code>${symbol}</code>\n` +
+                `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
+                `🎯 Target: ${target}%\n` +
+                `💸 Action: Selling ${config.sell}% of position\n\n` +
+                `<a href="${tokenLink}">📊 View on Dexscreener</a>\n\n` +
+                `Executing trade...`;
+
+            const keyboard = {
+                inline_keyboard: [
+                    [
+                        { text: '🛒 Buy More', callback_data: `buy_${tokenMint}` },
+                        { text: '💸 Sell Now', callback_data: `sell_${tokenMint}` }
+                    ],
+                    [
+                        { text: '📊 Dexscreener', url: tokenLink }
+                    ]
+                ]
+            };
+
+            await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: keyboard
+            });
+
+            await sellToken(tokenMint, sellAmount);
+
+            if (config.trailing && !trailingStopLoss[tokenMint]) {
+                trailingStopLoss[tokenMint] = {
+                    enabled: true,
+                    highestPrice: currentPrice,
+                    stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
+                    activatedAt: Date.now()
+                };
+                saveTrailingStops();
+                console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
             }
-            
+
             saveTradeHistory();
         }
     }
 }
+
 
 
 // ====== TRADE TRACKING FUNCTIONS ======
@@ -2922,6 +3123,16 @@ async function autoCopyTrade(walletAddress, tokenMint) {
         );
 
         const txid = await executeSwap(quote);
+        const allTrades = loadTradeMemory();
+        allTrades.push({
+            timestamp: Date.now(),
+            type: 'copy',
+            wallet: walletAddress,
+            token: tokenMint,
+            txid
+        });
+        saveTradeMemory(allTrades);
+
 
         // Enable copytrade flag for wallet+token
         if (!copytradeEnabled[walletAddress]) {
@@ -3019,6 +3230,18 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
     if (!result.success) {
     await bot.sendMessage(chatId, `❌ Buy failed: ${result.error}`);
     return;
+
+    
+    // ✅ Log auto-trade to memory
+    const allTrades = loadTradeMemory();
+    allTrades.push({
+        timestamp: Date.now(),
+        type: 'auto',
+        wallet: 'AUTO_TRADE',
+        token: tokenAddress,
+        txid: result.txid || 'unknown'
+    });
+    saveTradeMemory(allTrades);
 
     const currentPrice = await getTokenPrice(tokenAddress);
 if (!currentPrice) {
@@ -3325,3 +3548,19 @@ setInterval(async () => {
         }
     }
 }, 10000); // Check every 10 seconds
+
+
+const TRADE_CACHE_FILE = 'tradeMemory.json';
+
+function loadTradeMemory() {
+    try {
+        const data = fs.readFileSync(TRADE_CACHE_FILE);
+        return JSON.parse(data);
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveTradeMemory(trades) {
+    fs.writeFileSync(TRADE_CACHE_FILE, JSON.stringify(trades, null, 2));
+}
