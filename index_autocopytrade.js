@@ -381,6 +381,9 @@ if (tokenTransfers.length > 0) {
             { text: "💰 Buy 0.1", callback_data: `buy_0.1_${tokenMint}` }
         ],
         [
+            { text: '🧪 RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
+        ],
+        [
             { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
             { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
         ],
@@ -2741,7 +2744,7 @@ async function checkProfitTargets(tokenMint) {
             const buttons = {
                 inline_keyboard: [
                     [
-                        { text: '🛒 Buy 0.0001', callback_data: `buy_0.0001_${tokenMint}` },
+                        { text: '🛒 Buy 0.001', callback_data: `buy_0.001_${tokenMint}` },
                         { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` }
                     ]
                 ]
