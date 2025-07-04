@@ -1419,6 +1419,17 @@ if (data.startsWith('autocopytrade_')) {
         );
 
         const txid = await executeSwap(quote);
+        const allTrades = loadTradeMemory();
+        allTrades.push({
+            timestamp: Date.now(),
+            type: 'copy',
+            wallet: walletAddress,
+            token: tokenMint,
+            txid
+        });
+        saveTradeMemory(allTrades);
+
+
 
         if (!txid) throw new Error('Swap transaction failed');
 
@@ -2700,6 +2711,13 @@ async function checkProfitTargets(tokenMint) {
 
     const profitPercent = ((currentPrice - position.averageBuyPrice) / position.averageBuyPrice) * 100;
 
+    // Profit targets: 25%, 50%, 75%
+    const PROFIT_TARGETS = {
+        25: { sell: 25, trailing: false },
+        50: { sell: 25, trailing: false },
+        75: { sell: 50, trailing: true }
+    };
+
     for (const [target, config] of Object.entries(PROFIT_TARGETS)) {
         const targetPercent = parseFloat(target);
 
@@ -2708,58 +2726,55 @@ async function checkProfitTargets(tokenMint) {
 
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
             const sellAmount = balance * (config.sell / 100);
-            if (sellAmount <= 0) return;
 
-            console.log(`🎯 Profit target ${target}% hit for ${tokenMint}! Selling ${config.sell}%`);
+            if (sellAmount > 0) {
+                const tokenInfo = await getTokenInfo(tokenMint);
+                const tokenSymbol = tokenInfo?.symbol || tokenMint.slice(0, 6);
+                const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
 
-            const tokenInfo = await getTokenInfo(tokenMint);
-            const symbol = tokenInfo?.symbol || tokenMint.slice(0, 4) + '...' + tokenMint.slice(-4);
-            const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
+                const message =
+                    `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
+                    `🪙 Token: <code>${tokenSymbol}</code>\n` +
+                    `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
+                    `🎯 Target: ${target}%\n` +
+                    `💰 Action: Selling ${config.sell}% of position\n\n` +
+                    `🔗 <a href="${tokenLink}">View on Dexscreener</a>`;
 
-            const message =
-                `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
-                `🪙 Token: <code>${symbol}</code>\n` +
-                `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
-                `🎯 Target: ${target}%\n` +
-                `💸 Action: Selling ${config.sell}% of position\n\n` +
-                `<a href="${tokenLink}">📊 View on Dexscreener</a>\n\n` +
-                `Executing trade...`;
-
-            const keyboard = {
-                inline_keyboard: [
-                    [
-                        { text: '🛒 Buy More', callback_data: `buy_${tokenMint}` },
-                        { text: '💸 Sell Now', callback_data: `sell_${tokenMint}` }
-                    ],
-                    [
-                        { text: '📊 Dexscreener', url: tokenLink }
+                const buttons = {
+                    inline_keyboard: [
+                        [
+                            { text: '🛒 Buy Again', callback_data: `buy_${tokenMint}` },
+                            { text: '💰 Sell Now', callback_data: `sell_${tokenMint}` }
+                        ]
                     ]
-                ]
-            };
-
-            await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
-                parse_mode: 'HTML',
-                disable_web_page_preview: true,
-                reply_markup: keyboard
-            });
-
-            await sellToken(tokenMint, sellAmount);
-
-            if (config.trailing && !trailingStopLoss[tokenMint]) {
-                trailingStopLoss[tokenMint] = {
-                    enabled: true,
-                    highestPrice: currentPrice,
-                    stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
-                    activatedAt: Date.now()
                 };
-                saveTrailingStops();
-                console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
+
+                await sendTelegramMessage(message, {
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: false,
+                    reply_markup: buttons
+                });
+
+                await sellToken(tokenMint, sellAmount);
+
+                if (config.trailing && !trailingStopLoss[tokenMint]) {
+                    trailingStopLoss[tokenMint] = {
+                        enabled: true,
+                        highestPrice: currentPrice,
+                        stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
+                        activatedAt: Date.now()
+                    };
+                    saveTrailingStops();
+                    console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
+                }
             }
 
             saveTradeHistory();
         }
     }
 }
+
+
 
 
 
@@ -3228,11 +3243,11 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
 
     const result = await buyToken(tokenAddress, solAmount);
     if (!result.success) {
-    await bot.sendMessage(chatId, `❌ Buy failed: ${result.error}`);
-    return;
+        await bot.sendMessage(chatId, `❌ Buy failed: ${result.error}`);
+        return;
+    }
 
-    
-    // ✅ Log auto-trade to memory
+    // ✅ Log auto-trade to memory on success
     const allTrades = loadTradeMemory();
     allTrades.push({
         timestamp: Date.now(),
@@ -3244,10 +3259,10 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
     saveTradeMemory(allTrades);
 
     const currentPrice = await getTokenPrice(tokenAddress);
-if (!currentPrice) {
-    await bot.sendMessage(chatId, '❌ Could not fetch current price for token.');
-    return;
-}
+    if (!currentPrice) {
+        await bot.sendMessage(chatId, '❌ Could not fetch current price for token.');
+        return;
+    }
 
     autotradeTargets[tokenAddress] = {
         tokenMint: tokenAddress,
@@ -3261,11 +3276,6 @@ if (!currentPrice) {
         originalRebuyPct: rebuyPct
     };
 
-}
-
-
-
-
     await bot.sendMessage(chatId,
         `✅ Trade activated:\n` +
         `• Token: <code>${tokenAddress}</code>\n` +
@@ -3275,6 +3285,7 @@ if (!currentPrice) {
         { parse_mode: 'HTML' }
     );
 }
+
 
 
 
@@ -3388,10 +3399,7 @@ async function handlePortfolioCommand(chatId) {
                 });
             }
 
-            await bot.sendMessage(chatId,
-                `💼 <b>Total Portfolio Value:</b> ${totalValue.toFixed(4)} SOL`,
-                { parse_mode: 'HTML' }
-            );
+            
         }
 
     } catch (error) {
