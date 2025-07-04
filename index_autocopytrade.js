@@ -2711,9 +2711,8 @@ async function checkProfitTargets(tokenMint) {
 
     const profitPercent = ((currentPrice - position.averageBuyPrice) / position.averageBuyPrice) * 100;
 
-    // Profit targets: 25%, 50%, 75%
     const PROFIT_TARGETS = {
-        25: { sell: 25, trailing: false },
+        25: { sell: 12, trailing: false },
         50: { sell: 25, trailing: false },
         75: { sell: 50, trailing: true }
     };
@@ -2727,53 +2726,54 @@ async function checkProfitTargets(tokenMint) {
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
             const sellAmount = balance * (config.sell / 100);
 
-            if (sellAmount > 0) {
-                const tokenInfo = await getTokenInfo(tokenMint);
-                const tokenSymbol = tokenInfo?.symbol || tokenMint.slice(0, 6);
-                const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
+            const tokenInfo = await getTokenInfo(tokenMint);
+            const tokenSymbol = tokenInfo?.symbol || tokenMint.slice(0, 6);
+            const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
 
-                const message =
-                    `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
-                    `🪙 Token: <code>${tokenSymbol}</code>\n` +
-                    `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
-                    `🎯 Target: ${target}%\n` +
-                    `💰 Action: Selling ${config.sell}% of position\n\n` +
-                    `🔗 <a href="${tokenLink}">View on Dexscreener</a>`;
+            const message =
+                `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
+                `🪙 Token: <code>${tokenSymbol}</code>\n` +
+                `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
+                `🎯 Target: ${target}%\n` +
+                `💰 Action: Selling ${config.sell}% of position\n\n` +
+                `🔗 <a href="${tokenLink}">View on Dexscreener</a>`;
 
-                const buttons = {
-                    inline_keyboard: [
-                        [
-                            { text: '🛒 Buy Again', callback_data: `buy_${tokenMint}` },
-                            { text: '💰 Sell Now', callback_data: `sell_${tokenMint}` }
-                        ]
+            const buttons = {
+                inline_keyboard: [
+                    [
+                        { text: '🛒 Buy 0.0001', callback_data: `buy_0.0001_${tokenMint}` },
+                        { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` }
                     ]
-                };
+                ]
+            };
 
-                await sendTelegramMessage(message, {
-                    parse_mode: 'HTML',
-                    disable_web_page_preview: false,
-                    reply_markup: buttons
-                });
+            await sendTelegramMessage(message, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: false,
+                reply_markup: buttons
+            });
 
+            // Auto sell the percentage
+            if (sellAmount > 0) {
                 await sellToken(tokenMint, sellAmount);
+            }
 
-                if (config.trailing && !trailingStopLoss[tokenMint]) {
-                    trailingStopLoss[tokenMint] = {
-                        enabled: true,
-                        highestPrice: currentPrice,
-                        stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
-                        activatedAt: Date.now()
-                    };
-                    saveTrailingStops();
-                    console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
-                }
+            // Enable trailing stop loss if needed
+            if (config.trailing && !trailingStopLoss[tokenMint]) {
+                trailingStopLoss[tokenMint] = {
+                    enabled: true,
+                    highestPrice: currentPrice,
+                    stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
+                    activatedAt: Date.now()
+                };
+                saveTrailingStops();
+                console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
             }
 
             saveTradeHistory();
         }
     }
 }
-
 
 
 
