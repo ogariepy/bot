@@ -25,6 +25,9 @@ const GLOBAL_STOPLOSS = {
     percent: 30 // default stop loss at 30%
 };
 
+const profitTargets = {}; // Format: { tokenMint: { buyPrice, targetPct, autoSellPct } }
+
+
 
 
 
@@ -195,6 +198,10 @@ function initializeTrading() {
 // ====== ENHANCED MONITORING FUNCTION ======
 const processedSignaturesByWallet = new Map(); // walletAddress => Set of signatures
 
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function monitorAllWallets() {
     if (!isMonitoring) return;
 
@@ -256,6 +263,7 @@ async function monitorAllWallets() {
                     }
 
                     walletProcessed.add(signature);
+                    await delay(200); // delay between transactions to reduce API load
 
                 } catch (txError) {
                     console.error(`❌ Error parsing tx ${signature.slice(0, 8)}...: ${txError.message}`);
@@ -271,7 +279,7 @@ async function monitorAllWallets() {
             console.error(`❌ Failed to check wallet ${walletName}: ${error.message}`);
         }
 
-        await new Promise(resolve => setTimeout(resolve, 1000)); // short delay between wallets
+        await delay(1000); // delay between wallets
     }
 
     // Cleanup old signatures per wallet
@@ -286,6 +294,7 @@ async function monitorAllWallets() {
 
     setTimeout(monitorAllWallets, CONFIG.POLLING_INTERVAL_MS);
 }
+
 
 
 
@@ -706,7 +715,7 @@ async function handleTokenSent(walletAddress, tokenMint, amount, signature, isFu
 async function getSolPriceUSD() {
     try {
         // Get SOL price in USDC
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             CONFIG.USDC_ADDRESS,
             1000000000, // 1 SOL
@@ -725,7 +734,7 @@ async function getSolPriceUSD() {
 async function getTokenPrice(tokenMint) {
     try {
         // Try to get price via Jupiter quote (1 SOL worth)
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
             1000000000, // 1 SOL in lamports
@@ -744,7 +753,7 @@ async function getTokenPrice(tokenMint) {
             const tokenInfo = await getTokenInfo(tokenMint);
             const amount = Math.pow(10, tokenInfo.decimals); // 1 token
             
-            const reverseQuote = await getJupiterQuote(
+            const reverseQuote = await getCachedJupiterQuote(
                 tokenMint,
                 CONFIG.WSOL_ADDRESS,
                 amount,
@@ -991,30 +1000,72 @@ async function getTokenBalance(walletAddress, tokenMint) {
     }
 }
 
-async function getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
-    try {
-        const params = new URLSearchParams({
-            inputMint: inputMint,
-            outputMint: outputMint,
-            amount: amount.toString(),
-            slippageBps: slippageBps.toString(),
-            onlyDirectRoutes: 'false',
-            asLegacyTransaction: 'false',
-        });
-        
-        const response = await fetch(`${CONFIG.JUPITER_API_URL}/quote?${params}`);
-        const quote = await response.json();
-        
-        if (!quote || quote.error) {
-            throw new Error(quote?.error || 'Failed to get quote');
+
+
+
+
+async function getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300, retries = 3) {
+    const params = new URLSearchParams({
+        inputMint,
+        outputMint,
+        amount: amount.toString(),
+        slippageBps: slippageBps.toString(),
+        onlyDirectRoutes: 'false',
+        asLegacyTransaction: 'false',
+    });
+
+    const url = `${CONFIG.JUPITER_API_URL}/quote?${params}`;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await fetch(url);
+
+            if (response.status === 429) {
+                const delay = attempt * 1000;
+                console.warn(`⚠️ Rate limited by Jupiter API. Retrying in ${delay}ms (attempt ${attempt}/${retries})...`);
+                await new Promise(res => setTimeout(res, delay));
+                continue;
+            }
+
+            const quote = await response.json();
+
+            if (!quote || quote.error) {
+                throw new Error(quote?.error || 'Failed to get quote');
+            }
+
+            return quote;
+        } catch (err) {
+            if (attempt === retries) {
+                console.error(`❌ Jupiter quote failed after ${retries} attempts:`, err.message);
+                throw err;
+            }
         }
-        
-        return quote;
-    } catch (error) {
-        console.error('Error getting Jupiter quote:', error);
-        throw error;
     }
 }
+
+// 🧠 Keep this as-is
+const quoteCache = new Map();
+
+// ✅ Correct implementation
+async function getCachedJupiterQuote(inputMint, outputMint, amount, slippageBps = 300, ttl = 30_000) {
+    const key = `${inputMint}_${outputMint}_${amount}_${slippageBps}`;
+    const now = Date.now();
+
+    if (quoteCache.has(key)) {
+        const { timestamp, data } = quoteCache.get(key);
+        if (now - timestamp < ttl) {
+            return data; // ✅ Use cached quote
+        }
+    }
+
+    // ⚠️ THIS must be the *original* function!
+    const quote = await getJupiterQuote(inputMint, outputMint, amount, slippageBps);
+
+    quoteCache.set(key, { timestamp: now, data: quote });
+    return quote;
+}
+
+
 
 async function executeSwap(quoteResponse) {
     try {
@@ -1065,7 +1116,7 @@ async function executeSwap(quoteResponse) {
 
 async function buyToken(tokenMint, solAmount) {
     try {
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
             Math.floor(solAmount * 1e9),
@@ -1168,37 +1219,24 @@ bot.on('callback_query', async (callbackQuery) => {
         const { walletAddress, tokenMint } = stored;
 
         try {
-            const ownerPublicKey = new web3.PublicKey(walletAddress);
+            // ✅ FIX: Get *bot wallet's* balance, not source wallet
+            const amount = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
 
-            const tokenAccounts = await connection.getTokenAccountsByOwner(
-                ownerPublicKey,
-                { mint: new web3.PublicKey(tokenMint) }
-            );
+            if (amount > 0) {
+                const quote = await getCachedJupiterQuote(
+                    tokenMint,
+                    CONFIG.WSOL_ADDRESS,
+                    Math.floor(amount * 1e6), // assuming 6 decimals
+                    CONFIG.SLIPPAGE_BPS
+                );
 
-            if (tokenAccounts.value.length === 0) {
-                console.log(`ℹ️ No token account found for ${tokenMint}`);
+                await executeSwap(quote);
+                console.log(`✅ Swapped back ${amount} of ${tokenMint} to SOL`);
             } else {
-                const accountInfo = tokenAccounts.value[0];
-                const amountBuffer = accountInfo.account.data.slice(64, 72);
-                const amount = Number(amountBuffer.readBigUInt64LE());
-
-                if (amount > 0) {
-                    const quote = await getJupiterQuote(
-                        tokenMint,
-                        CONFIG.WSOL_ADDRESS,
-                        amount,
-                        CONFIG.SLIPPAGE_BPS
-                    );
-
-                    await executeSwap(quote);
-
-                    console.log(`✅ Swapped back ${amount} of ${tokenMint} to SOL`);
-                } else {
-                    console.log(`ℹ️ No balance of ${tokenMint} found in wallet`);
-                }
+                console.log(`ℹ️ No balance of ${tokenMint} found in bot wallet`);
             }
 
-            // Clean up copytrade tracking
+            // ✅ Clean up tracking
             if (copytradeEnabled[walletAddress]) {
                 delete copytradeEnabled[walletAddress][tokenMint];
                 if (Object.keys(copytradeEnabled[walletAddress]).length === 0) {
@@ -1212,7 +1250,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 `❌ <b>Autotrade Removed</b>\n\n` +
                 `👛 Wallet: <code>${walletAddress}</code>\n` +
                 `🪙 Token: <code>${tokenMint}</code>\n` +
-                `🔄 Attempted swap back to SOL.`,
+                `🔄 Swapped back to SOL.`,
                 { parse_mode: 'HTML' }
             );
 
@@ -1232,6 +1270,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     return;
 }
+
 
 
 
@@ -1309,7 +1348,7 @@ if (data.startsWith('sell_')) {
 
         const amountToSell = balance * (percentage / 100);
 
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             tokenMint,
             CONFIG.WSOL_ADDRESS,
             Math.floor(amountToSell * Math.pow(10, 6)), // 6 = assume USDC or SOL decimals; adjust if needed
@@ -1414,7 +1453,7 @@ if (data.startsWith('autocopytrade_')) {
     try {
         const solAmount = 0.0001;
 
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
             Math.floor(solAmount * 1e9),
@@ -1449,7 +1488,7 @@ if (data.startsWith('autocopytrade_')) {
 
         const message =
             `✅ <b>Autocopytrade Successful</b>\n\n` +
-            `👛 <b>Wallet:</b> <code>${walletAddress}</code>\n` +
+            `👛 <b>Wallet:</b> <a href="https://solscan.io/account/${walletAddress}">${shortenAddress(walletAddress)}</a>` +
             `🪙 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenName}</a>\n` +
             `💰 <b>Amount Bought:</b> ${solAmount} SOL\n\n` +
             `📊 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
@@ -1467,7 +1506,10 @@ if (data.startsWith('autocopytrade_')) {
                 [
                     { text: '📊 Dexscreener', url: `https://dexscreener.com/solana/${tokenMint}` },
                     { text: '🦉 Birdeye', url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
-                ]
+                ],
+                [
+                    { text: '🔍 View Wallet', url: `https://solscan.io/account/${walletAddress}` }
+                ] 
             ]
         };
 
@@ -2588,7 +2630,7 @@ async function passesTradeFilters(tokenMint, amount = CONFIG.COPYTRADE_AMOUNT_SO
         }
         
         // Check slippage
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
             Math.floor(amount * 1e9),
@@ -2705,78 +2747,90 @@ async function updateTrailingStopLoss(tokenMint) {
 }
 
 // Check and execute profit targets
-async function checkProfitTargets(tokenMint) {
-    const position = tradeHistory[tokenMint];
-    if (!position || position.totalBought <= position.totalSold) return;
+async function checkProfitTargets(chatId) {
+    for (const tokenMint of Object.keys(profitTargets)) {
+        const target = profitTargets[tokenMint];
+        const basePrice = target.buyPrice;
+        const sellPct = target.targetPct;
+        const autoSellPortion = target.autoSellPct || 50;
 
-    const currentPrice = await getTokenPrice(tokenMint);
-    if (!currentPrice || !position.averageBuyPrice) return;
+        const currentPrice = await getTokenPrice(tokenMint);
+        if (!currentPrice || !basePrice) continue;
 
-    const profitPercent = ((currentPrice - position.averageBuyPrice) / position.averageBuyPrice) * 100;
+        const profitPct = ((currentPrice - basePrice) / basePrice) * 100;
+        console.log(`[DEBUG] ${tokenMint} | Base: ${basePrice}, Current: ${currentPrice}, Profit: ${profitPct.toFixed(2)}%, Target: ${sellPct}%`);
 
-    const PROFIT_TARGETS = {
-        25: { sell: 12, trailing: false },
-        50: { sell: 25, trailing: false },
-        75: { sell: 50, trailing: true }
-    };
-
-    for (const [target, config] of Object.entries(PROFIT_TARGETS)) {
-        const targetPercent = parseFloat(target);
-
-        if (profitPercent >= targetPercent && !position[`target${target}Hit`]) {
-            position[`target${target}Hit`] = true;
+        if (profitPct >= sellPct) {
+            console.log(`[DEBUG] Profit target HIT for ${tokenMint}`);
 
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
-            const sellAmount = balance * (config.sell / 100);
-
-            const tokenInfo = await getTokenInfo(tokenMint);
-            const tokenSymbol = tokenInfo?.symbol || tokenMint.slice(0, 6);
-            const tokenLink = `https://dexscreener.com/solana/${tokenMint}`;
-
-            const message =
-                `🎯 <b>PROFIT TARGET HIT!</b>\n\n` +
-                `🪙 Token: <code>${tokenSymbol}</code>\n` +
-                `📈 Profit: +${profitPercent.toFixed(2)}%\n` +
-                `🎯 Target: ${target}%\n` +
-                `💰 Action: Selling ${config.sell}% of position\n\n` +
-                `🔗 <a href="${tokenLink}">View on Dexscreener</a>`;
-
-            const buttons = {
-                inline_keyboard: [
-                    [
-                        { text: '🛒 Buy 0.001', callback_data: `buy_0.001_${tokenMint}` },
-                        { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` }
-                    ]
-                ]
-            };
-
-            await sendTelegramMessage(message, {
-                parse_mode: 'HTML',
-                disable_web_page_preview: false,
-                reply_markup: buttons
-            });
-
-            // Auto sell the percentage
-            if (sellAmount > 0) {
-                await sellToken(tokenMint, sellAmount);
+            if (balance <= 0) {
+                console.log(`[DEBUG] Skipping ${tokenMint} — No token balance`);
+                continue;
             }
 
-            // Enable trailing stop loss if needed
-            if (config.trailing && !trailingStopLoss[tokenMint]) {
-                trailingStopLoss[tokenMint] = {
-                    enabled: true,
-                    highestPrice: currentPrice,
-                    stopPrice: currentPrice * (1 - RISK_MANAGEMENT.trailingStopLossPercent / 100),
-                    activatedAt: Date.now()
-                };
-                saveTrailingStops();
-                console.log(`📊 Activated trailing stop loss for ${tokenMint}`);
+            const sellAmount = Math.floor(balance * autoSellPortion / 100 * 1e6); // assuming 6 decimals
+            console.log(`[DEBUG] Calculated sell amount for ${tokenMint}: ${sellAmount}`);
+            if (sellAmount <= 0) continue;
+
+            try {
+                const quote = await getCachedJupiterQuote(
+                    tokenMint,
+                    CONFIG.WSOL_ADDRESS,
+                    sellAmount,
+                    CONFIG.SLIPPAGE_BPS
+                );
+
+                if (!quote) {
+                    console.warn(`⚠️ No Jupiter quote found for ${tokenMint}`);
+                    await bot.sendMessage(chatId,
+                        `⚠️ <b>Auto-sell failed</b>\n\n` +
+                        `🪙 Token: <code>${shortenAddress(tokenMint)}</code>\n` +
+                        `📈 Profit: +${profitPct.toFixed(2)}%\n` +
+                        `🚫 No Jupiter route found for this token.\n\n` +
+                        `Try manually selling on a DEX.`,
+                        { parse_mode: 'HTML' }
+                    );
+                    continue;
+                }
+
+                const txid = await executeSwap(quote);
+                console.log(`✅ Swapped ${tokenMint} for SOL | txid: ${txid}`);
+
+                await bot.sendMessage(chatId,
+                    `🚀 <b>PROFIT TARGET HIT!</b>\n\n` +
+                    `🪙 Token: <code>${shortenAddress(tokenMint)}</code>\n` +
+                    `📈 Profit: +${profitPct.toFixed(2)}%\n` +
+                    `💸 Auto-sold ${autoSellPortion}% of your position\n\n` +
+                    `<a href="https://solscan.io/tx/${txid}">🔗 View on Solscan</a>`,
+                    { parse_mode: 'HTML' }
+                );
+
+            } catch (err) {
+                console.error(`❌ Failed to auto-sell ${tokenMint}:`, err.message);
+                await bot.sendMessage(chatId,
+                    `❌ <b>Auto-sell failed</b>\n\n` +
+                    `🪙 Token: <code>${shortenAddress(tokenMint)}</code>\n` +
+                    `💥 Error: ${err.message}`,
+                    { parse_mode: 'HTML' }
+                );
             }
 
-            saveTradeHistory();
+            delete profitTargets[tokenMint];
+            console.log(`[DEBUG] Removed ${tokenMint} from profitTargets`);
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -3133,7 +3187,7 @@ async function autoCopyTrade(walletAddress, tokenMint) {
         const amountSOL = 0.0001;
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
 
-        const quote = await getJupiterQuote(
+        const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
             Math.floor(amountSOL * 1e9),
@@ -3220,74 +3274,81 @@ async function auto_trade(chatId, mode = 'preset', tokenAddress = null) {
         }
     }
 
-    let sellPct = 0;
-    while (true) {
-        const input = await ask("📈 Enter profit percentage to sell (e.g., 10 for 10%):");
-        const value = parseFloat(input);
-        if (!isNaN(value) && value > 0) {
-            sellPct = value;
-            break;
-        } else {
-            await bot.sendMessage(chatId, "❌ Invalid profit percentage. Try again.");
-        }
-    }
-
-    let rebuyPct = 0;
-    while (true) {
-        const input = await ask("🔁 Enter price drop percentage to rebuy (e.g., 5 for 5%):");
-        const value = parseFloat(input);
-        if (!isNaN(value) && value > 0 && value < 100) {
-            rebuyPct = value;
-            break;
-        } else {
-            await bot.sendMessage(chatId, "❌ Must be between 0–100%. Try again.");
-        }
-    }
-
     const result = await buyToken(tokenAddress, solAmount);
     if (!result.success) {
         await bot.sendMessage(chatId, `❌ Buy failed: ${result.error}`);
         return;
     }
 
-    // ✅ Log auto-trade to memory on success
-    const allTrades = loadTradeMemory();
-    allTrades.push({
-        timestamp: Date.now(),
-        type: 'auto',
-        wallet: 'AUTO_TRADE',
-        token: tokenAddress,
-        txid: result.txid || 'unknown'
-    });
-    saveTradeMemory(allTrades);
-
     const currentPrice = await getTokenPrice(tokenAddress);
     if (!currentPrice) {
-        await bot.sendMessage(chatId, '❌ Could not fetch current price for token.');
+        await bot.sendMessage(chatId, "❌ Could not fetch current price for token.");
         return;
     }
 
-    autotradeTargets[tokenAddress] = {
-        tokenMint: tokenAddress,
-        chatId,
-        amount: solAmount,
-        basePrice: currentPrice,
-        sellAt: currentPrice * (1 + sellPct / 100),
-        rebuyAt: currentPrice * (1 - rebuyPct / 100),
-        sold: false,
-        originalSellPct: sellPct,
-        originalRebuyPct: rebuyPct
+    // ✅ Track profit target with chatId included
+    profitTargets[tokenAddress] = {
+        buyPrice: currentPrice,
+        targetPct: 100,       // Sell at +100% profit
+        autoSellPct: 50,      // Sell 50% of balance
+        chatId
     };
 
     await bot.sendMessage(chatId,
-        `✅ Trade activated:\n` +
-        `• Token: <code>${tokenAddress}</code>\n` +
-        `• Amount: ${solAmount} SOL\n` +
-        `• Sell Target: +${sellPct}%\n` +
-        `• Rebuy Dip: -${rebuyPct}%`,
-        { parse_mode: 'HTML' }
+    `✅ Trade activated:\n` +
+    `• Token: <code>${tokenAddress}</code>\n` +
+    `• Amount: ${solAmount} SOL\n` +
+    `• Profit Target: +${profitTargets[tokenAddress].targetPct}%\n` +
+    `• Auto-sell: ${profitTargets[tokenAddress].autoSellPct}% of position`,
+    {
+        parse_mode: 'HTML',
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: '💸 Sell 25%', callback_data: `sell_25_${tokenAddress}` },
+                    { text: '💸 Sell 50%', callback_data: `sell_50_${tokenAddress}` },
+                    { text: '💸 Sell 100%', callback_data: `sell_100_${tokenAddress}` }
+                ]
+            ]
+        }
+    }
     );
+
+
+    // ✅ Start monitoring this token every 20 seconds
+    const interval = setInterval(async () => {
+        try {
+            console.log(`[AUTO_TRADE] Checking ${tokenAddress} for profit targets...`);
+            await checkProfitTargets();
+
+            const balance = await getTokenBalance(wallet.publicKey.toString(), tokenAddress);
+            console.log(`[AUTO_TRADE] Token balance: ${balance}`);
+
+            if (balance <= 0) {
+                clearInterval(interval);
+                delete profitTargets[tokenAddress];
+
+                await bot.sendMessage(chatId,
+                    `✅ Position sold. Auto-trading ended for:\n<code>${tokenAddress}</code>`,
+                    { parse_mode: 'HTML' }
+                );
+            }
+        } catch (err) {
+            console.error(`❌ Error in auto_trade monitor for ${tokenAddress}:`, err);
+        }
+    }, 20000);
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -3327,7 +3388,7 @@ async function handlePortfolioCommand(chatId) {
                 const tokenInfo = await getTokenInfo(mint);
                 let valueInSol = 0;
                 try {
-                    const quote = await getJupiterQuote(
+                    const quote = await getCachedJupiterQuote(
                         mint,
                         CONFIG.WSOL_ADDRESS,
                         Math.floor(balance * Math.pow(10, tokenInfo.decimals)),
