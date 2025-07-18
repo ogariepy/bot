@@ -329,7 +329,6 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         return;
     }
 
-    // General TX info (sent once per tx)
     let message =
         `📋 TRANSACTION DETECTED\n\n` +
         `👛 Wallet: ${walletName}\n` +
@@ -349,70 +348,80 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
 
     await sendTelegramMessage(message);
 
-    // Token Transfers — One message per token
-if (tokenTransfers.length > 0) {
-    const seenMints = new Set();
+    // 🧠 Token Transfers (one message per token)
+    if (tokenTransfers.length > 0) {
+        const seenMints = new Set();
 
-    for (const transfer of tokenTransfers) {
-        const tokenMint = transfer.mint;
-        
-        // 🚫 Skip Wrapped SOL transactions
-        if (tokenMint === 'So11111111111111111111111111111111111111112') continue;
+        for (const transfer of tokenTransfers) {
+            const tokenMint = transfer.mint;
+            if (seenMints.has(tokenMint)) continue;
+            seenMints.add(tokenMint);
 
-        if (seenMints.has(tokenMint)) continue;
-        seenMints.add(tokenMint);
+            const tokenInfo = await getTokenInfo(tokenMint);
+            const analytics = await getTokenAnalytics(tokenMint);
 
-        const tokenInfo = await getTokenInfo(tokenMint);
-        const analytics = await getTokenAnalytics(tokenMint);
-        const shortMint = shortenAddress(tokenMint);
-        const direction = transfer.direction === 'in' ? '+' : '-';
-        const emoji = transfer.direction === 'in' ? '📥' : '📤';
+            // 🚫 Filter out Wrapped SOL and USDC-like tokens by name/symbol
+            const tokenName = tokenInfo?.name?.toLowerCase() || '';
+            const tokenSymbol = tokenInfo?.symbol?.toLowerCase() || '';
 
-        const tokenMessage =
-            `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
-            `👛 Wallet: <b>${walletName}</b>\n` +
-            `<code>${walletAddress}</code>\n\n` +
-            `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
-            `📊 <b>Amount:</b> ${direction}${formatNumber(transfer.amount)}\n` +
-            `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
-            `📈 <b>24h Volume:</b> ${formatNumber(analytics.volume24h)}\n` +
-            `👥 <b>Holders:</b> ${analytics.holders}\n` +
-            `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
+            if (
+                tokenMint === 'So11111111111111111111111111111111111111112' ||
+                tokenName.includes('usd coin') ||
+                tokenSymbol.includes('usdc')
+            ) {
+                continue;
+            }
 
-       const keyboard = {
-    inline_keyboard: [
-        [
-            { text: "💰 Buy 0.001", callback_data: `buy_0.001_${tokenMint}` },
-            { text: "💰 Buy 0.01", callback_data: `buy_0.01_${tokenMint}` }
-        ],
-        [
-            { text: "💰 Buy 0.05", callback_data: `buy_0.05_${tokenMint}` },
-            { text: "💰 Buy 0.1", callback_data: `buy_0.1_${tokenMint}` }
-        ],
-        [
-            { text: '🧪 RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
-        ],
-        [
-            { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
-            { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
-        ],
-        [
-            { text: "🤖 Autocopytrade", callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
-            { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
-        ],
-        [
-            { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
-            { text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
-        ]
-    ]
-};
+            const shortMint = shortenAddress(tokenMint);
+            const direction = transfer.direction === 'in' ? '+' : '-';
+            const emoji = transfer.direction === 'in' ? '📥' : '📤';
 
-        await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+            const tokenMessage =
+                `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
+                `👛 Wallet: <b>${walletName}</b>\n` +
+                `<code>${walletAddress}</code>\n\n` +
+                `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
+                `📊 <b>Amount:</b> ${direction}${formatNumber(transfer.amount)}\n` +
+                `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
+                `📈 <b>24h Volume:</b> ${formatNumber(analytics.volume24h)}\n` +
+                `👥 <b>Holders:</b> ${analytics.holders}\n` +
+                `🆔 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenMint}</a>`;
+
+            const keyboard = {
+                inline_keyboard: [
+                    [
+                        { text: "💰 Buy 0.001", callback_data: `buy_0.001_${tokenMint}` },
+                        { text: "💰 Buy 0.01", callback_data: `buy_0.01_${tokenMint}` }
+                    ],
+                    [
+                        { text: "💰 Buy 0.05", callback_data: `buy_0.05_${tokenMint}` },
+                        { text: "💰 Buy 0.1", callback_data: `buy_0.1_${tokenMint}` }
+                    ],
+                    [
+                        { text: '🧪 RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
+                    ],
+                    [
+                        { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${tokenMint}` },
+                        { text: "🦉 Birdeye", url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+                    ],
+                    [
+                        { text: "🤖 Autocopytrade", callback_data: createAutocopytradeCallback(walletAddress, tokenMint) },
+                        { text: "🚫 Blacklist", callback_data: `blacklist_${tokenMint}` }
+                    ],
+                    [
+                        { text: "🛠 Autotrade", callback_data: `auto_trade_token_${tokenMint}` },
+                        { text: "🌐 Multi-DEX Support", callback_data: `multi_dex_${tokenMint}` }
+                    ]
+                ]
+            };
+
+            await sendTelegramMessage(tokenMessage, {
+                parse_mode: 'HTML',
+                reply_markup: keyboard
+            });
+        }
     }
-}
 
-
-    // Program interaction summary
     if (programInteractions.length > 0) {
         const programs = [...new Set(programInteractions.map(p => p.name))];
         const interactionMessage = `🛠 Program Interactions:\n` + programs.map(p => `• ${p}`).join('\n');
@@ -421,6 +430,8 @@ if (tokenTransfers.length > 0) {
 
     console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
+
+
 
 
 
@@ -1519,8 +1530,26 @@ if (data.startsWith('autocopytrade_')) {
     const { walletAddress, tokenMint } = stored;
     const chatId = callbackQuery.message.chat.id;
 
+    const ask = async (text) => {
+        await bot.sendMessage(chatId, text);
+        return new Promise((resolve) => {
+            bot.once('message', (msg) => resolve(msg.text.trim()));
+        });
+    };
+
     try {
-        const solAmount = 0.0001;
+        // Ask user for SOL amount
+        let solAmount = 0;
+        while (true) {
+            const input = await ask("💰 Enter SOL amount to copy trade:");
+            const value = parseFloat(input);
+            if (!isNaN(value) && value > 0) {
+                solAmount = parseFloat(value.toFixed(6));
+                break;
+            } else {
+                await bot.sendMessage(chatId, "❌ Invalid amount. Please enter a number > 0.");
+            }
+        }
 
         const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
@@ -1558,7 +1587,7 @@ if (data.startsWith('autocopytrade_')) {
 
         const message =
             `✅ <b>Autocopytrade Successful</b>\n\n` +
-            `👛 <b>Wallet:</b> <a href="https://solscan.io/account/${walletAddress}">${shortenAddress(walletAddress)}</a>` +
+            `👛 <b>Wallet:</b> <a href="https://solscan.io/account/${walletAddress}">${shortenAddress(walletAddress)}</a>\n` +
             `🪙 <b>Token:</b> <a href="https://dexscreener.com/solana/${tokenMint}">${tokenName}</a>\n` +
             `💰 <b>Amount Bought:</b> ${solAmount} SOL\n\n` +
             `📊 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)}\n` +
@@ -1592,7 +1621,7 @@ if (data.startsWith('autocopytrade_')) {
         await bot.answerCallbackQuery(callbackQuery.id, { text: 'Autocopytrade successful!' });
         console.log(`✅ Copied trade: ${walletAddress} → ${tokenMint}`);
 
-        // 🧠 Auto-sell logic connected
+        // 👀 Start monitoring for auto-sell when original wallet sells
         monitorOriginalTraderSell(walletAddress, tokenMint);
 
     } catch (err) {
@@ -1606,6 +1635,7 @@ if (data.startsWith('autocopytrade_')) {
 
     return;
 }
+
 
 
 if (data === 'show_recent_trades') {
