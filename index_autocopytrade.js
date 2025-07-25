@@ -429,7 +429,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
             copytradeEnabled?.[walletAddress]?.[tokenMint]?.enabled
         ) {
             console.log(`🔎 [analyze] Wallet is watched, triggering auto-sell for ${walletAddress}, ${tokenMint}`);
-            await onWalletSell(walletAddress, tokenMint, wallet);
+            await onWalletSell(walletAddress, tokenMint);
         }
     }
 
@@ -441,6 +441,8 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
 
     console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
+
+
 
 
 
@@ -4128,9 +4130,10 @@ async function onWalletBuy(walletAddress, tokenMint) {
 
 
 
-async function onWalletSell(walletAddress, tokenMint, wallet) {
+
+async function onWalletSell(walletAddress, tokenMint) {
     try {
-        const botWallet = wallet.publicKey.toString(); // ✅ Real signer public key
+        const botWallet = CONFIG.OWNER_PUBLIC_KEY;
 
         // ✅ Step 0: Check if this token is copytraded
         if (!copytradeEnabled?.[walletAddress]?.[tokenMint]?.enabled) {
@@ -4146,11 +4149,12 @@ async function onWalletSell(walletAddress, tokenMint, wallet) {
 
         console.log(`🌀 Auto-selling ${tokenMint} copied from ${walletAddress}`);
 
+        // ✅ Proceed with full sell logic (unchanged)
         const chatId = CONFIG.TELEGRAM_CHAT_ID;
         const walletName = walletNames?.[walletAddress] || shortenAddress(walletAddress);
 
         const accounts = await connection.getParsedTokenAccountsByOwner(
-            wallet.publicKey,
+            new PublicKey(botWallet),
             { programId: TOKEN_PROGRAM_ID }
         );
 
@@ -4177,13 +4181,9 @@ async function onWalletSell(walletAddress, tokenMint, wallet) {
         }
 
         const amountToSell = Math.floor(balance * Math.pow(10, decimals));
-
-        // ✅ Use native SOL (not WSOL)
-        const NATIVE_SOL = "So11111111111111111111111111111111111111112";
-
         const quote = await getCachedJupiterQuote(
             tokenMint,
-            NATIVE_SOL,
+            CONFIG.WSOL_ADDRESS,
             amountToSell,
             CONFIG.SLIPPAGE_BPS
         );
@@ -4193,8 +4193,7 @@ async function onWalletSell(walletAddress, tokenMint, wallet) {
             return;
         }
 
-        // ✅ Execute with signer
-        const txid = await executeSwap(quote, wallet);
+        const txid = await executeSwap(quote);
         if (!txid) throw new Error('Swap execution returned no txid');
 
         const allTrades = loadTradeMemory();
@@ -4226,7 +4225,7 @@ async function onWalletSell(walletAddress, tokenMint, wallet) {
 
         console.log(`✅ Full sell complete for ${tokenMint}`);
 
-        // ✅ Clean up copytrade tracking
+        // ✅ Step 6: Cleanup copytrade state
         delete copytradeEnabled[walletAddress][tokenMint];
 
     } catch (err) {
@@ -4234,6 +4233,8 @@ async function onWalletSell(walletAddress, tokenMint, wallet) {
         await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `❌ Auto-sell failed: ${err.message}`);
     }
 }
+
+
 
 
 
