@@ -30,8 +30,15 @@ const GLOBAL_STOPLOSS = {
 
 const profitTargets = {}; // Format: { tokenMint: { buyPrice, targetPct, autoSellPct } }
 
+const recentSnipes = []; // Holds last 5–10 snipe candidates
 
 
+let snipingEnabled = false;
+let snipingSettings = {
+    amountSol: 0.2,
+    slippage: 500, // 5%
+    blacklist: ['Test', 'Rug', 'Scam']
+};
 
 
 
@@ -1392,6 +1399,9 @@ bot.on('callback_query', async (callbackQuery) => {
 }
 
 
+
+
+
  // Toggle Auto Copy
     if (data.startsWith('copywallet_toggle_')) {
         const shortId = data.replace('copywallet_toggle_', '');
@@ -1746,6 +1756,32 @@ if (data.startsWith('autocopytrade_')) {
 
     return;
 }
+
+if (data === 'show_recent_snipes') {
+    const chatId = query.message.chat.id;
+
+    if (!Array.isArray(recentSnipes) || recentSnipes.length === 0) {
+        await bot.sendMessage(chatId, '😔 No recent snipe tokens found.');
+        return;
+    }
+
+    let message = '🎯 <b>Recent Snipe Tokens</b>\n\n';
+
+    for (const snipe of recentSnipes.slice(0, 10)) {
+        const name = snipe.name || 'Unknown';
+        const mint = snipe.address;
+
+        message += `• <b>${name}</b>\n<code>${mint}</code>\n` +
+                   `🔗 <a href="https://birdeye.so/token/${mint}?chain=solana">View Chart</a>\n\n`;
+    }
+
+    await bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: false
+    });
+}
+
+
 
 if (data === 'copywallet') {
     let message = `🔄 <b>Wallet-Wide Copytrade</b>\n\n`;
@@ -2185,6 +2221,9 @@ if (data === 'social_global') {
             );
             return;
         }
+
+        
+
         
         // Handle set stop loss
         if (data.startsWith('set_stoploss_')) {
@@ -2517,7 +2556,10 @@ bot.onText(/\/start/, async (msg) => {
                     { text: "📊 Portfolio", callback_data: "cmd_portfolio" },
                     { text: "📈 P/L Report", callback_data: "cmd_pl" },
                 ],
-                [{ text: '📜 Recent Trades (3h)', callback_data: 'show_recent_trades' }],
+                [
+                { text: '📜 Recent Trades (3h)', callback_data: 'show_recent_trades' },
+                { text: '🎯 Snipe Tokens', callback_data: 'show_snipes' },
+                ],
                 [
                     { text: "🔔 Price Alerts", callback_data: "cmd_alerts" },
                     { text: '🔄 Copy Wallet', callback_data: 'copywallet' },
@@ -2656,6 +2698,29 @@ bot.onText(/\/blacklist/, async (msg) => {
     
     await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
 });
+
+bot.onText(/\/snipe (.+)/, (msg, match) => {
+    const chatId = msg.chat.id;
+    const arg = match[1].toLowerCase();
+
+    if (arg === "on") {
+        snipingEnabled = true;
+        bot.sendMessage(chatId, `🟢 Sniping enabled`);
+    } else if (arg === "off") {
+        snipingEnabled = false;
+        bot.sendMessage(chatId, `🔴 Sniping disabled`);
+    } else if (arg === "settings") {
+        bot.sendMessage(chatId,
+            `⚙️ Sniping Settings:\n\n` +
+            `Amount (default): ${snipingSettings.amountSol} SOL\n` +
+            `Slippage: ${snipingSettings.slippage / 100}%\n` +
+            `Blacklist: ${snipingSettings.blacklist.join(', ')}`
+        );
+    } else {
+        bot.sendMessage(chatId, `❓ Unknown command. Try /snipe on | off | settings`);
+    }
+});
+
 
 bot.onText(/\/stats/, async (msg) => {
     const totalTrades = dailyStats.trades;
@@ -2810,6 +2875,8 @@ async function main() {
     // Start monitoring
     isMonitoring = true;
     monitorAllWallets();
+    startSnipingMonitor();
+    
     
     // Start position monitoring (every 2 minutes)
     positionMonitorInterval = setInterval(monitorPositions, 120000);
@@ -4233,6 +4300,90 @@ async function onWalletSell(walletAddress, tokenMint) {
         await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `❌ Auto-sell failed: ${err.message}`);
     }
 }
+
+
+async function startSnipingMonitor() {
+    const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    let latestSig = null;
+
+    setInterval(async () => {
+        if (!snipingEnabled) return;
+
+        try {
+            const url = `https://api.helius.xyz/v0/addresses/${TOKEN_PROGRAM}/transactions?limit=20&api-key=${CONFIG.HELIUS_API_KEY}`;
+            const response = await fetch(url);
+            const txs = await response.json();
+
+            if (!Array.isArray(txs)) {
+                console.error("❌ Sniping error (Helius): Invalid response", txs);
+                return;
+            }
+
+            console.log(`🔎 Fetched ${txs.length} transactions from Helius`);
+
+            for (const tx of txs) {
+                if (tx.signature === latestSig) break;
+                latestSig = tx.signature;
+
+                const mint = tx.tokenTransfers?.[0]?.mint;
+                const name = tx.tokenTransfers?.[0]?.tokenName || '';
+
+                if (!mint || recentSnipes.some(s => s.address === mint)) continue;
+
+                const analytics = await getTokenAnalytics(mint);
+                if (!analytics || analytics.liquidity < 5) continue; // 🧠 Minimum 5 SOL liquidity
+
+                const tokenInfo = await getTokenInfo(mint);
+                const symbol = tokenInfo?.symbol || 'Unknown';
+
+                // 🚫 Filter name by blacklist
+                if (snipingSettings.blacklist.some(bad => name.toLowerCase().includes(bad))) continue;
+
+                const message =
+                    `🎯 <b>New Token Detected</b>\n\n` +
+                    `🪙 <b>Name:</b> ${symbol} (${name})\n` +
+                    `🔗 <b>Mint:</b> <code>${mint}</code>\n` +
+                    `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)} SOL\n` +
+                    `📈 <b>Volume 24h:</b> ${formatNumber(analytics.volume24h)}\n` +
+                    `👥 <b>Holders:</b> ${analytics.holders}\n\n` +
+                    `📊 <a href="https://dexscreener.com/solana/${mint}">Dexscreener</a> | <a href="https://birdeye.so/token/${mint}?chain=solana">Birdeye</a>`;
+
+                const keyboard = {
+                    inline_keyboard: [
+                        [
+                            { text: "💰 Buy 0.0001", callback_data: `buy_0.0001_${mint}` },
+                            { text: "💰 Buy 0.001", callback_data: `buy_0.001_${mint}` }
+                        ],
+                        [
+                            { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${mint}` },
+                            { text: "🦉 Birdeye", url: `https://birdeye.so/token/${mint}?chain=solana` }
+                        ]
+                    ]
+                };
+
+                await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
+                    parse_mode: 'HTML',
+                    reply_markup: keyboard
+                });
+
+                // ✅ Save for recentSnipes button
+                recentSnipes.unshift({ name: symbol, address: mint });
+                if (recentSnipes.length > 10) recentSnipes.pop();
+
+                console.log(`✅ New snipe token: ${symbol} (${mint})`);
+            }
+
+        } catch (err) {
+            console.error("❌ Sniping monitor error:", err.message);
+        }
+    }, 30000); // Check every 30 seconds
+}
+
+
+
+
+
+
 
 
 
