@@ -356,7 +356,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         message += `💰 SOL Transfers:\n`;
         for (const sol of solTransfers) {
             const sEmoji = sol.direction === 'in' ? '📥' : '📤';
-            message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sent'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
+            message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sold'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
         }
         message += `\n`;
     }
@@ -384,7 +384,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         const emoji = transfer.direction === 'in' ? '📥' : '📤';
 
         const tokenMessage =
-            `📋 <b>TOKEN ${transfer.direction === 'in' ? 'RECEIVED' : 'SENT'}</b>\n\n` +
+            `📋 <b>TOKEN ${transfer.direction === 'in' ? 'BOUGHT' : 'SOLD'}</b>\n\n` +
             `👛 Wallet: <b>${walletName}</b>\n` +
             `<code>${walletAddress}</code>\n\n` +
             `${emoji} <b>Token:</b> ${shortMint} (${tokenInfo.name || 'Unknown Token'})\n` +
@@ -1780,6 +1780,7 @@ if (data === 'show_recent_snipes') {
         disable_web_page_preview: false
     });
 }
+
 
 
 
@@ -4117,6 +4118,31 @@ async function onWalletBuy(walletAddress, tokenMint) {
 
         console.log(`🚀 onWalletBuy triggered for ${walletAddress} | token: ${tokenMint} | amount: ${amountSOL} SOL`);
 
+        // ✅ Retry if SOL balance too low
+        let botSOLBalance = await getTokenBalance(CONFIG.OWNER_PUBLIC_KEY, CONFIG.WSOL_ADDRESS);
+        let notifiedLowBalance = false;
+
+        while (botSOLBalance < amountSOL) {
+            if (!notifiedLowBalance) {
+                const tokenInfo = await getTokenInfo(tokenMint);
+                const tokenName = tokenInfo?.symbol || tokenMint;
+
+                await bot.sendMessage(chatId,
+                    `❌ <b>Can't Make Purchase - SOL Balance Too Low</b>\n\n` +
+                    `🪙 <b>Token:</b> ${tokenName}\n` +
+                    `👛 <b>Bot Wallet:</b> <code>${shortenAddress(CONFIG.OWNER_PUBLIC_KEY)}</code>\n` +
+                    `💼 <b>Balance:</b> ${botSOLBalance.toFixed(4)} / ${amountSOL} SOL\n\n` +
+                    `🔁 Trying silently until balance is sufficient...`,
+                    { parse_mode: 'HTML' }
+                );
+                notifiedLowBalance = true;
+            }
+
+            // Wait and retry every 10 seconds
+            await new Promise(resolve => setTimeout(resolve, 10000));
+            botSOLBalance = await getTokenBalance(CONFIG.OWNER_PUBLIC_KEY, CONFIG.WSOL_ADDRESS);
+        }
+
         const quote = await getCachedJupiterQuote(
             CONFIG.WSOL_ADDRESS,
             tokenMint,
@@ -4132,7 +4158,6 @@ async function onWalletBuy(walletAddress, tokenMint) {
         const txid = await executeSwap(quote);
         if (!txid) throw new Error('Swap execution returned no txid');
 
-        // ✅ Save copytrade state for this (wallet, token) so onWalletSell can auto-sell later
         if (!copytradeEnabled[walletAddress]) copytradeEnabled[walletAddress] = {};
         copytradeEnabled[walletAddress][tokenMint] = {
             enabled: true,
@@ -4151,7 +4176,7 @@ async function onWalletBuy(walletAddress, tokenMint) {
         });
         saveTradeMemory(allTrades);
 
-        await monitorOriginalTraderSell(walletAddress, tokenMint); // ✅ Begin monitoring for sells
+        await monitorOriginalTraderSell(walletAddress, tokenMint);
 
         const tokenInfo = await getTokenInfo(tokenMint);
         const analytics = await getTokenAnalytics(tokenMint);
@@ -4192,6 +4217,8 @@ async function onWalletBuy(walletAddress, tokenMint) {
         await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `❌ Wallet copytrade failed: ${err.message}`);
     }
 }
+
+
 
 
 
@@ -4326,18 +4353,32 @@ async function startSnipingMonitor() {
                 latestSig = tx.signature;
 
                 const mint = tx.tokenTransfers?.[0]?.mint;
-                const name = tx.tokenTransfers?.[0]?.tokenName || '';
+                const name = tx.tokenTransfers?.[0]?.tokenName?.toLowerCase() || '';
 
                 if (!mint || recentSnipes.some(s => s.address === mint)) continue;
 
+                // ❌ Filter out common known tokens
+                if ([
+                    "So11111111111111111111111111111111111111112",
+                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  // USDC
+                ].includes(mint)) continue;
+
+                // ❌ Scam/blacklist filter
+                if (snipingSettings.blacklist.some(bad => name.includes(bad))) continue;
+
                 const analytics = await getTokenAnalytics(mint);
-                if (!analytics || analytics.liquidity < 5) continue; // 🧠 Minimum 5 SOL liquidity
+                if (!analytics || analytics.liquidity < 5) continue;
 
                 const tokenInfo = await getTokenInfo(mint);
                 const symbol = tokenInfo?.symbol || 'Unknown';
 
-                // 🚫 Filter name by blacklist
-                if (snipingSettings.blacklist.some(bad => name.toLowerCase().includes(bad))) continue;
+                // ✅ Rug check here
+                const isSafe = await checkRugRisk(mint);
+                if (!isSafe) {
+                    console.log(`⛔ Rug check failed for ${mint} (${symbol}) — skipping`);
+                    continue;
+                }
 
                 const message =
                     `🎯 <b>New Token Detected</b>\n\n` +
@@ -4351,8 +4392,8 @@ async function startSnipingMonitor() {
                 const keyboard = {
                     inline_keyboard: [
                         [
-                            { text: "💰 Buy 0.0001", callback_data: `buy_0.0001_${mint}` },
-                            { text: "💰 Buy 0.001", callback_data: `buy_0.001_${mint}` }
+                            { text: "💰 Buy 0.001", callback_data: `buy_0.001_${mint}` },
+                            { text: "💰 Buy 0.1", callback_data: `buy_0.1_${mint}` }
                         ],
                         [
                             { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${mint}` },
@@ -4366,17 +4407,59 @@ async function startSnipingMonitor() {
                     reply_markup: keyboard
                 });
 
-                // ✅ Save for recentSnipes button
                 recentSnipes.unshift({ name: symbol, address: mint });
                 if (recentSnipes.length > 10) recentSnipes.pop();
 
                 console.log(`✅ New snipe token: ${symbol} (${mint})`);
             }
-
         } catch (err) {
             console.error("❌ Sniping monitor error:", err.message);
         }
-    }, 30000); // Check every 30 seconds
+    }, 30000); // every 30 seconds
+}
+
+
+
+async function checkRugRisk(mint) {
+    try {
+        const info = await getTokenInfo(mint);
+        const symbol = (info?.symbol || '').toLowerCase();
+        const name = (info?.name || '').toLowerCase();
+
+        // 🚫 Obvious scam names
+        const scamWords = ['test', 'rug', 'fake', 'scam', 'dev', 'airdrop', 'pump', 'dump'];
+        if (scamWords.some(word => name.includes(word) || symbol.includes(word))) {
+            console.log(`⛔ Blocked by scam word in name: ${name}`);
+            return false;
+        }
+
+        const mintAuthority = info?.mintAuthority;
+        const updateAuthority = info?.updateAuthority;
+
+        // ✅ Accept if at least one authority is renounced
+        const isMintRenounced = !mintAuthority || mintAuthority === "11111111111111111111111111111111";
+        const isUpdateRenounced = !updateAuthority || updateAuthority === "11111111111111111111111111111111";
+
+        if (isMintRenounced || isUpdateRenounced) {
+            return true;
+        }
+
+        // 🟡 Allow if one of the authorities is a known contract/multisig — extend here if needed
+        const knownSafeMultisigs = [
+            // Add safe multisig addresses if available
+        ];
+
+        if (knownSafeMultisigs.includes(mintAuthority) || knownSafeMultisigs.includes(updateAuthority)) {
+            return true;
+        }
+
+        console.log(`⛔ Both authorities active: Mint=${mintAuthority}, Update=${updateAuthority}`);
+        return false;
+
+    } catch (err) {
+        console.warn(`⚠️ Rug check error for ${mint}: ${err.message}`);
+        return false;
+    }
 }
 
 
