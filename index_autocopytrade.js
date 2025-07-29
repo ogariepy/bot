@@ -15,8 +15,12 @@ const {
     Transaction,
     VersionedTransaction
 } = require('@solana/web3.js');
+const cheerio = require('cheerio'); // Make sure this is installed
+
 
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token'); // ✅ Add this line
+
+
 
 
 // Custom logic
@@ -80,6 +84,8 @@ const CONFIG = {
         'D8BuboNjz2m6ioCrrKuXVBAdAYkbLSKdeRvjdd5UhfvM',
         'sksdV4teo31iiivKrmggtP8EhW1DJonFg1uuPKL1Fi9'
     ],
+
+
     
     // Monitoring settings
     POLLING_INTERVAL_MS: 30000, // Check every 30 seconds
@@ -1781,7 +1787,40 @@ if (data === 'show_recent_snipes') {
     });
 }
 
+if (data === 'set_snipe_amount') {
+        bot.sendMessage(chatId, "💰 Enter new sniping amount in SOL:");
+        bot.once('message', (msg) => {
+            const amount = parseFloat(msg.text);
+            if (isNaN(amount) || amount <= 0) {
+                bot.sendMessage(chatId, "❌ Invalid amount. Try again.");
+                return;
+            }
+            snipingSettings.amountSol = amount;
+            bot.sendMessage(chatId, `✅ Sniping amount updated to ${amount} SOL.`);
+        });
+    }
 
+    else if (data === 'set_snipe_slippage') {
+        bot.sendMessage(chatId, "📉 Enter new slippage % (e.g., 5):");
+        bot.once('message', (msg) => {
+            const slippage = parseFloat(msg.text);
+            if (isNaN(slippage) || slippage <= 0 || slippage > 100) {
+                bot.sendMessage(chatId, "❌ Invalid slippage. Try 1–100.");
+                return;
+            }
+            snipingSettings.slippage = slippage * 100;
+            bot.sendMessage(chatId, `✅ Slippage updated to ${slippage}%.`);
+        });
+    }
+
+    else if (data === 'edit_snipe_blacklist') {
+        bot.sendMessage(chatId, "🚫 Send new blacklist, comma-separated (e.g., test,rug,scam):");
+        bot.once('message', (msg) => {
+            const list = msg.text.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+            snipingSettings.blacklist = list;
+            bot.sendMessage(chatId, `✅ Blacklist updated: ${list.join(', ')}`);
+        });
+    }
 
 
 if (data === 'copywallet') {
@@ -2711,16 +2750,33 @@ bot.onText(/\/snipe (.+)/, (msg, match) => {
         snipingEnabled = false;
         bot.sendMessage(chatId, `🔴 Sniping disabled`);
     } else if (arg === "settings") {
-        bot.sendMessage(chatId,
-            `⚙️ Sniping Settings:\n\n` +
-            `Amount (default): ${snipingSettings.amountSol} SOL\n` +
-            `Slippage: ${snipingSettings.slippage / 100}%\n` +
-            `Blacklist: ${snipingSettings.blacklist.join(', ')}`
-        );
+        const message =
+            `⚙️ <b>Sniping Settings:</b>\n\n` +
+            `💰 <b>Amount:</b> ${snipingSettings.amountSol} SOL\n` +
+            `📉 <b>Slippage:</b> ${snipingSettings.slippage / 100}%\n` +
+            `🚫 <b>Blacklist:</b> ${snipingSettings.blacklist.join(', ')}`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: "💰 Set Amount", callback_data: "set_snipe_amount" },
+                    { text: "📉 Set Slippage", callback_data: "set_snipe_slippage" }
+                ],
+                [
+                    { text: "🚫 Edit Blacklist", callback_data: "edit_snipe_blacklist" }
+                ]
+            ]
+        };
+
+        bot.sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+        });
     } else {
         bot.sendMessage(chatId, `❓ Unknown command. Try /snipe on | off | settings`);
     }
 });
+
 
 
 bot.onText(/\/stats/, async (msg) => {
@@ -2876,8 +2932,8 @@ async function main() {
     // Start monitoring
     isMonitoring = true;
     monitorAllWallets();
-    startSnipingMonitor();
-    
+    //startSnipingMonitor();
+    startSnipingMonitorFromBirdeye();
     
     // Start position monitoring (every 2 minutes)
     positionMonitorInterval = setInterval(monitorPositions, 120000);
@@ -3374,12 +3430,27 @@ async function monitorPositions() {
                 history.riskWarningsSent = true;
                 await sendTelegramMessage(
                     `⚠️ <b>POSITION AT RISK</b>\n\n` +
-                    `Token: ${tokenInfo.symbol}\n` +
-                    `Loss: ${profitPercent.toFixed(2)}%\n` +
-                    `Current Price: ${currentPrice.toFixed(8)} SOL\n` +
-                    `Avg Buy Price: ${history.averageBuyPrice.toFixed(8)} SOL\n\n` +
-                    `Consider setting a stop loss or reducing position size.`,
-                    { parse_mode: 'HTML' }
+    `Token: ${tokenInfo.symbol}\n` +
+    `Loss: ${profitPercent.toFixed(2)}%\n` +
+    `Current Price: ${currentPrice.toFixed(8)} SOL\n` +
+    `Avg Buy Price: ${history.averageBuyPrice.toFixed(8)} SOL\n\n` +
+    `Consider setting a stop loss or reducing position size.`,
+    {
+        parse_mode: 'HTML',
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
+                    { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
+                    { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
+                ],
+                [
+                    { text: '📈 View Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+                    { text: '🦉 Birdeye', url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+                ]
+            ]
+        }
+    }
                 );
             }
 
@@ -4328,57 +4399,297 @@ async function onWalletSell(walletAddress, tokenMint) {
     }
 }
 
+async function estimateTokenCreationDate(mintAddress) {
+    try {
+        // 1. Try Helius first — most accurate on-chain timestamp
+        const heliusDate = await estimateCreationDateFromHelius(mintAddress);
+        if (heliusDate) return heliusDate;
 
-async function startSnipingMonitor() {
-    const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-    let latestSig = null;
+        // 2. Then Dexscreener fallback
+        const dexUrl = `https://api.dexscreener.com/latest/dex/pairs/solana/${mintAddress}`;
+        const dexRes = await fetch(dexUrl);
+        const dexData = await dexRes.json();
+
+        if (dexData?.pair?.createdAt) {
+            const date = new Date(dexData.pair.createdAt);
+            console.log(`✅ Dexscreener creation date for ${mintAddress}: ${date.toISOString()}`);
+            return date;
+        } else if (Array.isArray(dexData?.pairs)) {
+            const found = dexData.pairs.find(p => p.createdAt);
+            if (found?.createdAt) {
+                const date = new Date(found.createdAt);
+                console.log(`✅ Dexscreener fallback creation date for ${mintAddress}: ${date.toISOString()}`);
+                return date;
+            }
+        }
+
+        console.warn(`⚠️ Dexscreener failed, skipping Pump.fun scrape for ${mintAddress}`);
+        return null;
+    } catch (err) {
+        console.warn(`❌ estimateTokenCreationDate error for ${mintAddress}: ${err.message}`);
+        return null;
+    }
+}
+
+
+
+async function estimateCreationDateFromHelius(mintAddress) {
+    try {
+        const url = `https://api.helius.xyz/v0/addresses/${mintAddress}/transactions?limit=5&api-key=${CONFIG.HELIUS_API_KEY}`;
+        const res = await fetch(url);
+        const txs = await res.json();
+
+        if (!Array.isArray(txs) || txs.length === 0) {
+            console.warn(`⚠️ No transactions found in Helius for ${mintAddress}`);
+            return null;
+        }
+
+        const firstTx = txs.reduce((earliest, tx) => {
+            return (!earliest || tx.timestamp < earliest.timestamp) ? tx : earliest;
+        }, null);
+
+        if (!firstTx?.timestamp) return null;
+
+        const date = new Date(firstTx.timestamp * 1000);
+        console.log(`✅ Helius creation date for ${mintAddress}: ${date.toISOString()}`);
+        return date;
+    } catch (err) {
+        console.warn(`❌ Failed to fetch from Helius for ${mintAddress}: ${err.message}`);
+        return null;
+    }
+}
+
+
+
+async function estimateCreationDateFromPumpFun(mintAddress) {
+    try {
+        const url = `https://pump.fun/${mintAddress}`;
+        const res = await fetch(url);
+        const html = await res.text();
+        const $ = cheerio.load(html);
+        const bodyText = $("body").text();
+
+        const match = bodyText.match(/Launched\s+(\d+)\s+(seconds?|minutes?|hours?)\s+ago/i);
+        if (!match) {
+            console.warn(`⚠️ No launch info found on pump.fun for ${mintAddress}`);
+            return null;
+        }
+
+        const amount = parseInt(match[1]);
+        const unit = match[2];
+        let offsetMs = 0;
+
+        if (unit.startsWith("second")) offsetMs = amount * 1000;
+        else if (unit.startsWith("minute")) offsetMs = amount * 60 * 1000;
+        else if (unit.startsWith("hour")) offsetMs = amount * 60 * 60 * 1000;
+
+        const launchDate = new Date(Date.now() - offsetMs);
+        console.log(`✅ Pump.fun estimated creation date for ${mintAddress}: ${launchDate.toISOString()}`);
+        return launchDate;
+    } catch (err) {
+        console.warn(`❌ Failed to fetch from pump.fun for ${mintAddress}: ${err.message}`);
+        return null;
+    }
+}
+
+
+
+
+
+/*async function startSnipingMonitor() {
+    const seenMints = new Set();
 
     setInterval(async () => {
         if (!snipingEnabled) return;
 
-        try {
-            const url = `https://api.helius.xyz/v0/addresses/${TOKEN_PROGRAM}/transactions?limit=20&api-key=${CONFIG.HELIUS_API_KEY}`;
-            const response = await fetch(url);
-            const txs = await response.json();
+        console.log("🔁 Starting new scan cycle...");
 
-            if (!Array.isArray(txs)) {
-                console.error("❌ Sniping error (Helius): Invalid response", txs);
+        try {
+            const url = `https://api.helius.xyz/v0/addresses/TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA/transactions?limit=500&api-key=${CONFIG.HELIUS_API_KEY}`;
+            const res = await fetch(url);
+            const txs = await res.json();
+
+            if (!Array.isArray(txs) || txs.length === 0) {
+                console.log("🕒 No transactions found.");
                 return;
             }
 
-            console.log(`🔎 Fetched ${txs.length} transactions from Helius`);
+            console.log(`📦 Retrieved ${txs.length} transactions`);
 
             for (const tx of txs) {
-                if (tx.signature === latestSig) break;
-                latestSig = tx.signature;
+                const timestamp = tx?.timestamp;
+                const sig = tx?.signature?.slice(0, 8) || 'unknown';
 
-                const mint = tx.tokenTransfers?.[0]?.mint;
-                const name = tx.tokenTransfers?.[0]?.tokenName?.toLowerCase() || '';
+                if (!timestamp) {
+                    console.warn(`⚠️ No timestamp for tx ${sig}`);
+                    continue;
+                }
 
-                if (!mint || recentSnipes.some(s => s.address === mint)) continue;
+                const tokenEvents = tx?.events?.token;
+                if (!Array.isArray(tokenEvents)) {
+                    console.warn(`⚠️ Tx ${sig} missing token events`);
+                    continue;
+                }
 
-                // ❌ Filter out common known tokens
-                if ([
-                    "So11111111111111111111111111111111111111112",
-                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
-                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  // USDC
-                ].includes(mint)) continue;
+                for (const event of tokenEvents) {
+                    if (event.type !== 'initializeMint') continue;
 
-                // ❌ Scam/blacklist filter
-                if (snipingSettings.blacklist.some(bad => name.includes(bad))) continue;
+                    const mint = event.mint;
+                    const mintAuthority = event.authority;
+
+                    if (!mint || seenMints.has(mint)) continue;
+
+                    // ⛔ TEMP: Disable this filter during testing
+                    // if (!mintAuthority || (!mintAuthority.startsWith("Caqo") && !mintAuthority.startsWith("4Mxe"))) {
+                    //     console.log(`⛔ Skipping ${mint} — Unknown authority: ${mintAuthority}`);
+                    //     continue;
+                    // }
+
+                    console.log(`🧪 Found initializeMint: ${mint} by ${mintAuthority}`);
+
+                    // Confirm mint is actually new (less than 1 day old)
+                    const creationDate = await estimateTokenCreationDate(mint);
+                    if (!creationDate) {
+                        console.warn(`⚠️ Could not determine creation date for ${mint}`);
+                        continue;
+                    }
+
+                    const ageMs = Date.now() - creationDate.getTime();
+                    const ageMin = ageMs / (60 * 1000);
+
+                    if (ageMs > 24 * 60 * 60 * 1000) {
+                        console.log(`⏱️ Skipping ${mint} — age: ${ageMin.toFixed(1)} minutes (> 24h)`);
+                        continue;
+                    }
+
+                    console.log(`✅ New token candidate: ${mint} (Age: ${ageMin.toFixed(1)} min)`);
+
+                    seenMints.add(mint);
+
+                    const tokenInfo = await getTokenInfo(mint);
+                    const symbol = tokenInfo?.symbol || 'Unknown';
+                    const name = tokenInfo?.name?.toLowerCase() || '';
+
+                    if (snipingSettings.blacklist.some(b => name.includes(b))) {
+                        console.log(`🚫 Blacklisted name: ${name}`);
+                        continue;
+                    }
+
+                    const analytics = await getTokenAnalytics(mint);
+                    if (!analytics || analytics.liquidity < 5) {
+                        console.log(`💧 Skipping ${mint} — low liquidity (${analytics?.liquidity ?? 'unknown'})`);
+                        continue;
+                    }
+
+                    const isSafe = await checkRugRisk(mint);
+                    if (!isSafe) {
+                        console.log(`⚠️ ${mint} flagged as unsafe by rug check`);
+                        continue;
+                    }
+
+                    const message =
+                        `🎯 <b>New Token Detected</b>\n\n` +
+                        `🪙 <b>Name:</b> ${symbol} (${name})\n` +
+                        `🔗 <b>Mint:</b> <code>${mint}</code>\n` +
+                        `💧 <b>Liquidity:</b> ${formatNumber(analytics.liquidity)} SOL\n` +
+                        `📈 <b>Volume 24h:</b> ${formatNumber(analytics.volume24h)}\n` +
+                        `👥 <b>Holders:</b> ${analytics.holders}\n\n` +
+                        `📊 <a href="https://dexscreener.com/solana/${mint}">Dexscreener</a> | <a href="https://birdeye.so/token/${mint}?chain=solana">Birdeye</a>`;
+
+                    const keyboard = {
+                        inline_keyboard: [
+                            [
+                                { text: "💰 Buy 0.001", callback_data: `buy_0.001_${mint}` },
+                                { text: "💰 Buy 0.1", callback_data: `buy_0.1_${mint}` }
+                            ],
+                            [
+                                { text: "📊 Dexscreener", url: `https://dexscreener.com/solana/${mint}` },
+                                { text: "🦉 Birdeye", url: `https://birdeye.so/token/${mint}?chain=solana` }
+                            ]
+                        ]
+                    };
+
+                    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message, {
+                        parse_mode: 'HTML',
+                        reply_markup: keyboard
+                    });
+
+                    recentSnipes.unshift({ name: symbol, address: mint });
+                    if (recentSnipes.length > 10) recentSnipes.pop();
+
+                    console.log(`🚀 Token sent to Telegram: ${symbol} (${mint})`);
+                }
+            }
+
+        } catch (err) {
+            console.error("❌ Helius scan failed:", err.message);
+        }
+    }, 30000); // 30s interval
+}*/
+
+
+
+async function startSnipingMonitorFromBirdeye() {
+    const seenMints = new Set();
+
+    setInterval(async () => {
+        if (!snipingEnabled) return;
+
+        console.log("🔁 Scanning Birdeye for recent token launches...");
+
+        try {
+            const res = await fetch('https://public-api.birdeye.so/public/token/created', {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const data = await res.json();
+            const tokens = data?.data || [];
+
+            if (!Array.isArray(tokens) || tokens.length === 0) {
+                console.log("🕒 No recent tokens found on Birdeye");
+                return;
+            }
+
+            for (const token of tokens) {
+                const mint = token?.address;
+                const name = token?.name?.toLowerCase() || '';
+
+                if (!mint || seenMints.has(mint)) continue;
+
+                const creationDate = await estimateTokenCreationDate(mint);
+                if (!creationDate) continue;
+
+                const ageMs = Date.now() - creationDate.getTime();
+                const ageMin = ageMs / (60 * 1000);
+
+                if (ageMs > 24 * 60 * 60 * 1000) {
+                    console.log(`⏱️ Skipping ${mint} — age ${ageMin.toFixed(1)} min (> 24h)`);
+                    continue;
+                }
+
+                seenMints.add(mint);
+
+                if (snipingSettings.blacklist.some(b => name.includes(b))) {
+                    console.log(`🚫 Blacklisted token: ${name}`);
+                    continue;
+                }
 
                 const analytics = await getTokenAnalytics(mint);
-                if (!analytics || analytics.liquidity < 5) continue;
+                if (!analytics || analytics.liquidity < 5) {
+                    console.log(`💧 Skipping ${mint} — low liquidity (${analytics?.liquidity ?? 'unknown'})`);
+                    continue;
+                }
+
+                const isSafe = await checkRugRisk(mint);
+                if (!isSafe) {
+                    console.log(`⚠️ ${mint} flagged as unsafe`);
+                    continue;
+                }
 
                 const tokenInfo = await getTokenInfo(mint);
                 const symbol = tokenInfo?.symbol || 'Unknown';
-
-                // ✅ Rug check here
-                const isSafe = await checkRugRisk(mint);
-                if (!isSafe) {
-                    console.log(`⛔ Rug check failed for ${mint} (${symbol}) — skipping`);
-                    continue;
-                }
 
                 const message =
                     `🎯 <b>New Token Detected</b>\n\n` +
@@ -4410,13 +4721,32 @@ async function startSnipingMonitor() {
                 recentSnipes.unshift({ name: symbol, address: mint });
                 if (recentSnipes.length > 10) recentSnipes.pop();
 
-                console.log(`✅ New snipe token: ${symbol} (${mint})`);
+                console.log(`🚀 Sniped: ${symbol} (${mint}) — Age: ${ageMin.toFixed(1)} min`);
             }
+
         } catch (err) {
-            console.error("❌ Sniping monitor error:", err.message);
+            console.error("❌ Birdeye scan failed:", err.message);
         }
+
     }, 30000); // every 30 seconds
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -4461,6 +4791,7 @@ async function checkRugRisk(mint) {
         return false;
     }
 }
+
 
 
 
