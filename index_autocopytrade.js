@@ -18,6 +18,7 @@ const {
 const cheerio = require('cheerio'); // Make sure this is installed
 
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token'); // ✅ Add this line
+const walletNotificationsEnabled = {};
 
 
 
@@ -107,6 +108,10 @@ const TRADING_LIMITS = {
     DAILY_LIMIT_SOL: 20,
     APPROVED_USERS: [CONFIG.TELEGRAM_CHAT_ID],
 };
+
+for (const address of CONFIG.WALLETS_TO_MONITOR) {
+    walletNotificationsEnabled[address] = true;
+}
 
 // ====== ADVANCED TRADING SETTINGS ======
 const PROFIT_TARGETS = {
@@ -332,6 +337,8 @@ function safeCallbackData(prefix, value) {
 }
 
 async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
+    const notificationsDisabled = walletNotificationsEnabled?.[walletAddress] === false;
+
     if (processedSignatures.has(sigInfo.signature)) return;
     processedSignatures.add(sigInfo.signature);
 
@@ -349,24 +356,27 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         return;
     }
 
-    let message =
-        `📋 TRANSACTION DETECTED\n\n` +
-        `👛 Wallet: ${walletName}\n` +
-        `${walletAddress}\n` +
-        `⏰ Time: ${txTime}\n` +
-        `✅ Status: ${success ? 'Success' : 'Failed'}\n` +
-        `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
+    // Send message only if notifications are enabled
+    if (!notificationsDisabled) {
+        let message =
+            `📋 TRANSACTION DETECTED\n\n` +
+            `👛 Wallet: ${walletName}\n` +
+            `${walletAddress}\n` +
+            `⏰ Time: ${txTime}\n` +
+            `✅ Status: ${success ? 'Success' : 'Failed'}\n` +
+            `💸 Fee: ${fee.toFixed(6)} SOL\n\n`;
 
-    if (solTransfers.length > 0) {
-        message += `💰 SOL Transfers:\n`;
-        for (const sol of solTransfers) {
-            const sEmoji = sol.direction === 'in' ? '📥' : '📤';
-            message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sold'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
+        if (solTransfers.length > 0) {
+            message += `💰 SOL Transfers:\n`;
+            for (const sol of solTransfers) {
+                const sEmoji = sol.direction === 'in' ? '📥' : '📤';
+                message += `${sEmoji} ${sol.direction === 'in' ? 'Received' : 'Sold'} ${sol.amount.toFixed(6)} SOL ${sol.direction === 'in' ? 'from' : 'to'} ${shortenAddress(sol.counterparty)}\n`;
+            }
+            message += `\n`;
         }
-        message += `\n`;
-    }
 
-    await sendTelegramMessage(message);
+        await sendTelegramMessage(message);
+    }
 
     const seenMints = new Set();
 
@@ -410,6 +420,11 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
                     { text: "💰 Buy 0.1", callback_data: `buy_0.1_${tokenMint}` }
                 ],
                 [
+                    { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
+                    { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
+                    { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
+                ],
+                [
                     { text: '🧪 RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
                 ],
                 [
@@ -427,7 +442,9 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
             ]
         };
 
-        await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+        if (!notificationsDisabled) {
+            await sendTelegramMessage(tokenMessage, { parse_mode: 'HTML', reply_markup: keyboard });
+        }
 
         // 🔁 COPYTRADE BUY
         if (transfer.direction === 'in' && copytradeEnabled[walletAddress]?.enabled) {
@@ -435,7 +452,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
             await onWalletBuy(walletAddress, tokenMint);
         }
 
-        // 💸 COPYTRADE SELL — FIXED LOGIC HERE
+        // 💸 COPYTRADE SELL
         if (
             transfer.direction === 'out' &&
             copytradeEnabled?.[walletAddress]?.[tokenMint]?.enabled
@@ -445,7 +462,7 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
         }
     }
 
-    if (programInteractions.length > 0) {
+    if (!notificationsDisabled && programInteractions.length > 0) {
         const programs = [...new Set(programInteractions.map(p => p.name))];
         const interactionMessage = `🛠 Program Interactions:\n` + programs.map(p => `• ${p}`).join('\n');
         await sendTelegramMessage(interactionMessage);
@@ -453,6 +470,8 @@ async function analyzeAllTransactionTypes(walletAddress, tx, sigInfo) {
 
     console.log(`✅ TX summary sent for ${walletName} (${sigInfo.signature.slice(0, 8)}...)`);
 }
+
+
 
 
 
@@ -1342,6 +1361,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const chatId = callbackQuery.message.chat.id;
     const userId = callbackQuery.from.id;
     
+    
     try {
         if (data.startsWith('remove_copy_')) {
     const uid = data.split('_')[2];
@@ -1475,6 +1495,30 @@ bot.on('callback_query', async (callbackQuery) => {
 
 
 
+
+if (data.startsWith('toggle_wallet_')) {
+    const wallet = data.replace('toggle_wallet_', '');
+    walletNotificationsEnabled[wallet] = !walletNotificationsEnabled[wallet];
+
+    const status = walletNotificationsEnabled[wallet] ? '✅ Enabled' : '❌ Disabled';
+    await bot.answerCallbackQuery(callbackQuery.id, { text: `${shortenAddress(wallet)} is now ${status}` });
+
+    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+        const isEnabled = walletNotificationsEnabled[addr];
+        return [{
+            text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
+            callback_data: `toggle_wallet_${addr}`
+        }];
+    });
+
+    await bot.editMessageReplyMarkup(
+        { inline_keyboard },
+        {
+            chat_id: callbackQuery.message.chat.id,
+            message_id: callbackQuery.message.message_id
+        }
+    );
+}
 
 
 
@@ -1761,6 +1805,27 @@ if (data.startsWith('autocopytrade_')) {
 
     return;
 }
+
+if (data === 'manage_wallet_addresses') {
+    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+        const isEnabled = walletNotificationsEnabled[addr];
+        return [{
+            text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
+            callback_data: `toggle_wallet_${addr}`
+        }];
+    });
+
+    await bot.editMessageText('👛 <b>Manage Wallet Notification Preferences</b>', {
+        chat_id: chatId,
+        message_id: callbackQuery.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+    });
+}
+
+
+
+
 
 if (data === 'show_recent_snipes') {
     const chatId = query.message.chat.id;
@@ -2620,7 +2685,7 @@ bot.onText(/\/start/, async (msg) => {
                 ],
                 [
                     { text: "🚀 Trending Meme Boosts", callback_data: "scan_memes" },
-                    { text: '🔄 Refresh', callback_data: 'cmd_start' }
+                    { text: "👛 Manage Wallets", callback_data: "manage_wallet_addresses" }
                 ]
             ]
         };
@@ -2781,6 +2846,22 @@ bot.onText(/\/snipe (.+)/, (msg, match) => {
         bot.sendMessage(chatId, `❓ Unknown command. Try /snipe on | off | settings`);
     }
 });
+
+bot.onText(/\/manageWalletAddresses/, async (msg) => {
+    const chatId = msg.chat.id; // ← correct
+    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+        const isEnabled = walletNotificationsEnabled[addr];
+        return [{
+            text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
+            callback_data: `toggle_wallet_${addr}`
+        }];
+    });
+
+    await bot.sendMessage(chatId, '🔧 Manage Wallet Notification Status:', {
+        reply_markup: { inline_keyboard }
+    });
+});
+
 
 
 
@@ -4458,6 +4539,19 @@ async function startSnipingMonitor() {
 
                 if (!mint || recentSnipes.some(s => s.address === mint)) continue;
 
+                if ([
+                    "So11111111111111111111111111111111111111112", // WSOL
+                    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  // USDC
+                ].includes(mint)) continue;
+
+
+                // ⏳ Filter out old tokens (older than 1 day)
+                if (!(await isTokenNew(mint))) {
+                    console.log(`⏳ Token ${mint} skipped — older than 1 day.`);
+                    continue;
+                }
+
                 // ❌ Skip known base tokens
                 if ([
                     "So11111111111111111111111111111111111111112",
@@ -4527,6 +4621,7 @@ async function startSnipingMonitor() {
 
 
 
+
 async function checkRugRisk(mint) {
     try {
         const info = await getTokenInfo(mint);
@@ -4568,6 +4663,55 @@ async function checkRugRisk(mint) {
         return false;
     }
 }
+
+
+
+async function isTokenNew(tokenMint) {
+    try {
+        // 1. Try Helius Asset API
+        const url = `https://api.helius.xyz/v0/assets?mint=${tokenMint}&api-key=${CONFIG.HELIUS_API_KEY}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const createdAt = data?.items?.[0]?.createdAt;
+
+        if (createdAt) {
+            const createdTime = new Date(createdAt).getTime();
+            const now = Date.now();
+            const ageInMs = now - createdTime;
+            return ageInMs <= 86400 * 1000; // 24h
+        } else {
+            console.warn(`⚠️ No creation date from Helius for ${tokenMint}, falling back to RPC`);
+        }
+
+        // 2. Fallback: use Solana signatures
+        const mintPubkey = new PublicKey(tokenMint);
+        const signatures = await connection.getSignaturesForAddress(mintPubkey, { limit: 20 });
+
+        if (!signatures || signatures.length === 0) {
+            console.warn(`⚠️ No fallback signatures for ${tokenMint}`);
+            return false;
+        }
+
+        const earliest = signatures.reduce((min, sig) =>
+            (!sig.blockTime || (min.blockTime && sig.blockTime > min.blockTime)) ? min : sig
+        );
+
+        if (!earliest.blockTime) {
+            console.warn(`⚠️ No valid blockTime in fallback for ${tokenMint}`);
+            return false;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const ageInSeconds = now - earliest.blockTime;
+        return ageInSeconds <= 86400;
+
+    } catch (err) {
+        console.error(`❌ Error in isTokenNew(${tokenMint}):`, err.message);
+        return false;
+    }
+}
+
 
 
 
