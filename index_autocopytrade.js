@@ -19,6 +19,7 @@ const cheerio = require('cheerio'); // Make sure this is installed
 
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token'); // ✅ Add this line
 const walletNotificationsEnabled = {};
+const awaitingWalletInput = {};
 
 
 
@@ -1806,6 +1807,101 @@ if (data.startsWith('autocopytrade_')) {
     return;
 }
 
+if (data === 'show_wallets_to_remove') {
+    await bot.answerCallbackQuery(callbackQuery.id);
+
+    const keyboard = CONFIG.WALLETS_TO_MONITOR.map(wallet => ([
+        {
+            text: `❌ ${shortenAddress(wallet)}`,
+            callback_data: `remove_wallet_${wallet}`
+        }
+    ]));
+
+    await bot.sendMessage(chatId, "Select a wallet to remove:", {
+        reply_markup: { inline_keyboard: keyboard }
+    });
+
+    return;
+}
+
+
+if (data === 'wallet_options') {
+    await bot.answerCallbackQuery(callbackQuery.id);
+
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "➕ Add Wallet", callback_data: "add_wallet_prompt" }],
+            [{ text: "🗑 Remove Wallet", callback_data: "show_wallets_to_remove" }]
+        ]
+    };
+
+    await bot.sendMessage(chatId, "What would you like to do?", {
+        reply_markup: keyboard
+    });
+
+    return;
+}
+
+
+if (data === 'add_wallet_prompt') {
+    awaitingWalletInput[chatId] = true;
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await bot.sendMessage(chatId, '📥 Send the wallet address to add:');
+    return;
+}
+
+if (data.startsWith('remove_wallet_')) {
+    const wallet = data.replace('remove_wallet_', '');
+
+    const index = CONFIG.WALLETS_TO_MONITOR.indexOf(wallet);
+    if (index !== -1) {
+        CONFIG.WALLETS_TO_MONITOR.splice(index, 1);
+        delete walletNotificationsEnabled[wallet];
+    }
+
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await bot.sendMessage(chatId, `🗑️ Removed wallet:\n<code>${wallet}</code>`, {
+        parse_mode: 'HTML'
+    });
+
+    // Refresh the wallet list
+    bot.sendMessage(chatId, '/AddRemoveWallet');
+    return;
+}
+
+
+if (data.startsWith('toggle_wallet_')) {
+    const wallet = data.replace('toggle_wallet_', '');
+    const isDisabled = walletNotificationsEnabled?.[wallet] === false;
+
+    walletNotificationsEnabled[wallet] = !isDisabled;
+
+    await bot.answerCallbackQuery(callbackQuery.id, {
+        text: `${!isDisabled ? '✅ Enabled' : '❌ Disabled'} for ${shortenAddress(wallet)}`,
+        show_alert: false
+    });
+
+    bot.sendMessage(chatId, '/AddRemoveWallet');
+    return;
+}
+
+// 🗑 Remove wallet completely
+if (data.startsWith('remove_wallet_')) {
+    const wallet = data.replace('remove_wallet_', '');
+
+    const index = CONFIG.WALLETS_TO_MONITOR.indexOf(wallet);
+    if (index !== -1) {
+        CONFIG.WALLETS_TO_MONITOR.splice(index, 1);
+        delete walletNotificationsEnabled[wallet];
+    }
+
+    await bot.answerCallbackQuery(callbackQuery.id);
+    await bot.sendMessage(chatId, `🗑 Removed <code>${wallet}</code>`, { parse_mode: 'HTML' });
+
+    bot.sendMessage(chatId, '/AddRemoveWallet');
+    return;
+}
+
 if (data === 'manage_wallet_addresses') {
     const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
         const isEnabled = walletNotificationsEnabled[addr];
@@ -2676,7 +2772,7 @@ bot.onText(/\/start/, async (msg) => {
                     { text: '📢 Social Monitor', callback_data: 'social_global' }
                 ],
                 [
-                    { text: "📈 Trending", callback_data: "show_trending" },
+                    { text: "🧾 Add or Remove Wallet", callback_data: "wallet_options" },
                     { text: "🧠 Risk Filters", callback_data: "show_risk" }
                 ],
                 [
@@ -2805,6 +2901,66 @@ bot.onText(/\/blacklist/, async (msg) => {
     
     await bot.sendMessage(msg.chat.id, message, { parse_mode: 'HTML' });
 });
+
+bot.onText(/\/AddRemoveWallet/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    const keyboard = CONFIG.WALLETS_TO_MONITOR.map((wallet) => {
+        const isDisabled = walletNotificationsEnabled?.[wallet] === false;
+        const display = `${isDisabled ? '❌' : '✅'} ${shortenAddress(wallet)}`;
+
+        return [{
+            text: display,
+            callback_data: `toggle_wallet_${wallet}`
+        }, {
+            text: '🗑 Remove',
+            callback_data: `remove_wallet_${wallet}`
+        }];
+    }).map(row => [row[0], row[1]]); // Two buttons per row
+
+    // Add "Add Wallet" button at the end
+    keyboard.push([{ text: '➕ Add Wallet', callback_data: 'add_wallet_prompt' }]);
+
+    await bot.sendMessage(chatId, '🧾 <b>Manage Wallet Notification Preferences</b>', {
+        parse_mode: 'HTML',
+        reply_markup: {
+            inline_keyboard: keyboard
+        }
+    });
+});
+
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    if (awaitingWalletInput[chatId]) {
+        delete awaitingWalletInput[chatId];
+
+        if (!/^.{32,44}$/.test(text)) {
+            await bot.sendMessage(chatId, '❌ Invalid wallet address.');
+            return;
+        }
+
+        if (!CONFIG.WALLETS_TO_MONITOR.includes(text)) {
+            CONFIG.WALLETS_TO_MONITOR.push(text);
+            walletNotificationsEnabled[text] = true;
+
+            await bot.sendMessage(chatId, `✅ Added <code>${text}</code>`, { parse_mode: 'HTML' });
+        } else {
+            await bot.sendMessage(chatId, `⚠️ Wallet already exists.`, { parse_mode: 'HTML' });
+        }
+
+
+        bot.sendMessage(chatId, '/AddRemoveWallet');    
+    }
+});
+
+function shortenAddress(addr) {
+    return addr.slice(0, 4) + '...' + addr.slice(-4);
+}
+
+
+
 
 bot.onText(/\/snipe (.+)/, (msg, match) => {
     const chatId = msg.chat.id;
@@ -4713,6 +4869,17 @@ async function isTokenNew(tokenMint) {
 }
 
 
+function sendWalletOptionsMenu(chatId) {
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "👛 Wallet Options", callback_data: "wallet_options" }]
+        ]
+    };
+
+    bot.sendMessage(chatId, "Choose what you want to do:", {
+        reply_markup: keyboard
+    });
+}
 
 
 
