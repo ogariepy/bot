@@ -87,6 +87,7 @@ const CONFIG = {
     ],
 
 
+
     
     // Monitoring settings
     POLLING_INTERVAL_MS: 30000, // Check every 30 seconds
@@ -102,6 +103,9 @@ const CONFIG = {
     COPYTRADE_AMOUNT_SOL: 0.001, // Always buy 0.001 SOL worth
 };
 
+let monitoredWallets = [...CONFIG.WALLETS_TO_MONITOR];
+
+
 // Trading limits for safety
 const TRADING_LIMITS = {
     MAX_BUY_AMOUNT_SOL: 5,
@@ -110,7 +114,7 @@ const TRADING_LIMITS = {
     APPROVED_USERS: [CONFIG.TELEGRAM_CHAT_ID],
 };
 
-for (const address of CONFIG.WALLETS_TO_MONITOR) {
+for (const address of monitoredWallets) {
     walletNotificationsEnabled[address] = true;
 }
 
@@ -233,7 +237,7 @@ async function monitorAllWallets() {
 
     console.log(`\n🔄 Checking all wallets at ${new Date().toLocaleTimeString()}...`);
 
-    for (const walletAddress of CONFIG.WALLETS_TO_MONITOR) {
+    for (const walletAddress of monitoredWallets) {
         const walletName = walletNames[walletAddress] || shortenAddress(walletAddress);
         console.log(`👀 Checking ${walletName}: ${walletAddress}`);
 
@@ -1504,7 +1508,7 @@ if (data.startsWith('toggle_wallet_')) {
     const status = walletNotificationsEnabled[wallet] ? '✅ Enabled' : '❌ Disabled';
     await bot.answerCallbackQuery(callbackQuery.id, { text: `${shortenAddress(wallet)} is now ${status}` });
 
-    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+    const inline_keyboard = monitoredWallets.map(addr => {
         const isEnabled = walletNotificationsEnabled[addr];
         return [{
             text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
@@ -1810,7 +1814,7 @@ if (data.startsWith('autocopytrade_')) {
 if (data === 'show_wallets_to_remove') {
     await bot.answerCallbackQuery(callbackQuery.id);
 
-    const keyboard = CONFIG.WALLETS_TO_MONITOR.map(wallet => ([
+    const keyboard = monitoredWallets.map(wallet => ([
         {
             text: `❌ ${shortenAddress(wallet)}`,
             callback_data: `remove_wallet_${wallet}`
@@ -1844,19 +1848,25 @@ if (data === 'wallet_options') {
 
 
 if (data === 'add_wallet_prompt') {
-    awaitingWalletInput[chatId] = true;
+    awaitingWalletInput[chatId] = true; // ← THIS LINE IS CRITICAL
     await bot.answerCallbackQuery(callbackQuery.id);
     await bot.sendMessage(chatId, '📥 Send the wallet address to add:');
     return;
 }
 
+
+
+
+
 if (data.startsWith('remove_wallet_')) {
     const wallet = data.replace('remove_wallet_', '');
 
-    const index = CONFIG.WALLETS_TO_MONITOR.indexOf(wallet);
+    const index = monitoredWallets.indexOf(wallet);
     if (index !== -1) {
-        CONFIG.WALLETS_TO_MONITOR.splice(index, 1);
+        monitoredWallets.splice(index, 1);
+        delete walletNames[wallet];
         delete walletNotificationsEnabled[wallet];
+        delete copytradeEnabled[wallet]; // Optional: remove if using
     }
 
     await bot.answerCallbackQuery(callbackQuery.id);
@@ -1864,10 +1874,13 @@ if (data.startsWith('remove_wallet_')) {
         parse_mode: 'HTML'
     });
 
-    // Refresh the wallet list
-    bot.sendMessage(chatId, '/AddRemoveWallet');
+    // 🔄 Refresh both wallet views
+    bot.emit('text', { chat: { id: chatId }, text: '/AddRemoveWallet' });
+    bot.emit('text', { chat: { id: chatId }, text: '/copywallet' });
+
     return;
 }
+
 
 
 if (data.startsWith('toggle_wallet_')) {
@@ -1889,21 +1902,26 @@ if (data.startsWith('toggle_wallet_')) {
 if (data.startsWith('remove_wallet_')) {
     const wallet = data.replace('remove_wallet_', '');
 
-    const index = CONFIG.WALLETS_TO_MONITOR.indexOf(wallet);
+    const index = monitoredWallets.indexOf(wallet);
     if (index !== -1) {
-        CONFIG.WALLETS_TO_MONITOR.splice(index, 1);
-        delete walletNotificationsEnabled[wallet];
+        monitoredWallets.splice(index, 1); // Remove from list
+        delete walletNotificationsEnabled[wallet]; // Clean up state
+        delete walletNames[wallet]; // Also remove name if exists
+        delete copytradeEnabled[wallet]; // Clean up copytrade if any
     }
 
     await bot.answerCallbackQuery(callbackQuery.id);
-    await bot.sendMessage(chatId, `🗑 Removed <code>${wallet}</code>`, { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, `🗑 Removed <code>${wallet}</code> from monitoring.`, { parse_mode: 'HTML' });
 
-    bot.sendMessage(chatId, '/AddRemoveWallet');
+    // Refresh the copywallet UI
+    bot.emit('text', { ...callbackQuery.message, text: '/copywallet' });
+
     return;
 }
 
+
 if (data === 'manage_wallet_addresses') {
-    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+    const inline_keyboard = monitoredWallets.map(addr => {
         const isEnabled = walletNotificationsEnabled[addr];
         return [{
             text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
@@ -2740,7 +2758,7 @@ bot.onText(/\/start/, async (msg) => {
             `🔧 <b>Bot Status:</b>\n` +
             `• Monitoring: ${isMonitoring ? '✅ Active' : '❌ Stopped'}\n` +
             `• Trading: ${tradingPaused ? '⏸️ Paused' : '✅ Active'}\n` +
-            `• Wallets Tracked: ${CONFIG.WALLETS_TO_MONITOR.length}\n\n` +
+            `• Wallets Tracked: ${monitoredWallets.length}\n\n` +
             `📚 <b>Commands:</b>\n` +
             `/portfolio - View all your tokens\n` +
             `/pl - View P/L for all positions\n` +
@@ -2905,7 +2923,7 @@ bot.onText(/\/blacklist/, async (msg) => {
 bot.onText(/\/AddRemoveWallet/, async (msg) => {
     const chatId = msg.chat.id;
 
-    const keyboard = CONFIG.WALLETS_TO_MONITOR.map((wallet) => {
+    const keyboard = monitoredWallets.map((wallet) => {
         const isDisabled = walletNotificationsEnabled?.[wallet] === false;
         const display = `${isDisabled ? '❌' : '✅'} ${shortenAddress(wallet)}`;
 
@@ -2931,29 +2949,35 @@ bot.onText(/\/AddRemoveWallet/, async (msg) => {
 
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const text = msg.text.trim();
+    const text = msg.text?.trim();
 
-    if (awaitingWalletInput[chatId]) {
-        delete awaitingWalletInput[chatId];
+    if (!awaitingWalletInput[chatId]) return;
 
-        if (!/^.{32,44}$/.test(text)) {
-            await bot.sendMessage(chatId, '❌ Invalid wallet address.');
-            return;
-        }
+    delete awaitingWalletInput[chatId];
 
-        if (!CONFIG.WALLETS_TO_MONITOR.includes(text)) {
-            CONFIG.WALLETS_TO_MONITOR.push(text);
-            walletNotificationsEnabled[text] = true;
-
-            await bot.sendMessage(chatId, `✅ Added <code>${text}</code>`, { parse_mode: 'HTML' });
-        } else {
-            await bot.sendMessage(chatId, `⚠️ Wallet already exists.`, { parse_mode: 'HTML' });
-        }
-
-
-        bot.sendMessage(chatId, '/AddRemoveWallet');    
+    if (!text || text.length < 32 || !text.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)) {
+        return bot.sendMessage(chatId, `❌ Invalid wallet address.`);
     }
+
+    const newWallet = text;
+
+    if (monitoredWallets.includes(newWallet)) {
+        return bot.sendMessage(chatId, `⚠️ Wallet already being monitored.`);
+    }
+
+    monitoredWallets.push(newWallet);
+    walletNames[newWallet] = newWallet.slice(0, 4) + '...Wallet';
+    walletNotificationsEnabled[newWallet] = true;
+
+    await bot.sendMessage(chatId, `✅ <b>Added</b>\n<code>${newWallet}</code>`, {
+        parse_mode: 'HTML'
+    });
+
+    console.log('[ADD] monitoredWallets now:', monitoredWallets);
+
+    bot.emit('text', { ...msg, text: '/copywallet' });
 });
+
 
 function shortenAddress(addr) {
     return addr.slice(0, 4) + '...' + addr.slice(-4);
@@ -3005,7 +3029,7 @@ bot.onText(/\/snipe (.+)/, (msg, match) => {
 
 bot.onText(/\/manageWalletAddresses/, async (msg) => {
     const chatId = msg.chat.id; // ← correct
-    const inline_keyboard = CONFIG.WALLETS_TO_MONITOR.map(addr => {
+    const inline_keyboard = monitoredWallets.map(addr => {
         const isEnabled = walletNotificationsEnabled[addr];
         return [{
             text: `${isEnabled ? '✅' : '❌'} ${shortenAddress(addr)}`,
@@ -3056,14 +3080,18 @@ bot.onText(/\/copywallet/, async (msg) => {
     const chatId = msg.chat.id;
 
     let message = `🔄 <b>Auto Copy Wallet Settings</b>\n\n`;
-    message += `<i>Select a wallet to toggle Auto Copy and set trade amount.</i>\n\n`;
+    message += `Default amount per trade: <b>${CONFIG.COPYTRADE_AMOUNT_SOL || 0.001} SOL</b>\n`;
+    message += `Smart Filters: ${COPYTRADE_FILTERS.enableFilters ? '✅ Enabled' : '❌ Disabled'}\n\n`;
+    message += `<i>Click a wallet to toggle copy mode or change amount:\n✅ = Enabled, ❌ = Disabled</i>\n\n`;
+    message += `The bot will auto-buy tokens that wallet buys (if filters pass).\n`;
 
     const keyboard = { inline_keyboard: [] };
     walletShortMap.clear();
 
     let index = 0;
 
-    for (const [walletAddress, walletName] of Object.entries(walletNames)) {
+    for (const walletAddress of monitoredWallets) {
+        const walletName = walletNames[walletAddress] || `${walletAddress.slice(0, 4)}...Wallet`;
         const isEnabled = copytradeEnabled[walletAddress]?.enabled || false;
         const amount = copytradeEnabled[walletAddress]?.amount || CONFIG.COPYTRADE_AMOUNT_SOL || 0.0005;
         const status = isEnabled ? '✅' : '❌';
@@ -3088,6 +3116,8 @@ bot.onText(/\/copywallet/, async (msg) => {
         reply_markup: keyboard
     });
 });
+
+
 
 
 
@@ -3135,10 +3165,12 @@ bot.onText(/\/wallet/, async (msg) => {
     );
 });
 
+
+
 // ====== MAIN FUNCTION ======
 async function main() {
     console.log('🚀 Advanced Crypto Trading Bot Started');
-    console.log(`📍 Monitoring ${CONFIG.WALLETS_TO_MONITOR.length} wallets`);
+    console.log(`📍 Monitoring ${monitoredWallets.length} wallets`);
     console.log(`⏱️  Check interval: ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds`);
     console.log(`🛡️  Smart Filters: ${COPYTRADE_FILTERS.enableFilters ? 'Enabled' : 'Disabled'}`);
     console.log(`🎯 Auto Profit Targets: Enabled`);
@@ -3163,7 +3195,7 @@ async function main() {
     
     await sendTelegramMessage(
         `🚀 <b>Advanced Bot Started</b>\n\n` +
-        `Monitoring ${CONFIG.WALLETS_TO_MONITOR.length} wallets\n` +
+        `Monitoring ${monitoredWallets.length} wallets\n` +
         `Check interval: Every ${CONFIG.POLLING_INTERVAL_MS / 1000} seconds\n` +
         `Trading: ${wallet ? 'Enabled' : 'Disabled'}\n` +
         `Smart Filters: ${COPYTRADE_FILTERS.enableFilters ? 'Enabled' : 'Disabled'}\n` +
