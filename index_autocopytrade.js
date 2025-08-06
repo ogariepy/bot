@@ -20,6 +20,7 @@ const cheerio = require('cheerio'); // Make sure this is installed
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token'); // ✅ Add this line
 const walletNotificationsEnabled = {};
 const awaitingWalletInput = {};
+const awaitingBuyInput = {};
 
 
 
@@ -90,7 +91,7 @@ const CONFIG = {
 
     
     // Monitoring settings
-    POLLING_INTERVAL_MS: 30000, // Check every 30 seconds
+    POLLING_INTERVAL_MS: 5000, // Check every 5 seconds
     MIN_TOKEN_VALUE_USD: 0.001,
     
     // Known token addresses
@@ -1549,7 +1550,6 @@ if (data.startsWith('buy')) {
     });
 
     const walletBalance = await getTokenBalance(wallet.publicKey.toString(), CONFIG.WSOL_ADDRESS);
-
     if (walletBalance < amount + 0.01) {
         await bot.sendMessage(chatId,
             `❌ Insufficient balance!\n\nWallet has ${walletBalance.toFixed(4)} SOL\nNeeded: ${(amount + 0.01).toFixed(4)} SOL (including fees)`,
@@ -1566,14 +1566,40 @@ if (data.startsWith('buy')) {
         if (!dailyUsage[today][userId]) dailyUsage[today][userId] = 0;
         dailyUsage[today][userId] += amount;
 
+        let extraMessage = '';
+        let replyMarkup = undefined;
+
+        if (GLOBAL_STOPLOSS.enabled) {
+            const currentPrice = await getTokenPrice(tokenMint); // in SOL
+            const solUsd = await getSolanaPriceUSD();
+            const currentUsd = currentPrice * solUsd;
+            const stopUsd = currentUsd * (1 - GLOBAL_STOPLOSS.percent / 100);
+
+            await addPriceAlert(tokenMint, stopUsd, 'stoploss');
+            extraMessage = `\n\n🛡 <b>Automatic Stop Loss Set</b>\n📉 Stop: $${stopUsd.toFixed(6)} (${GLOBAL_STOPLOSS.percent}% below buy price)`;
+        } else {
+            extraMessage = `\n\n🛑 <b>Set Stop Loss?</b>\nClick below to define your own stop-loss price.`;
+            replyMarkup = {
+                inline_keyboard: [[
+                    { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` }
+                ]]
+            };
+        }
+
         await bot.sendMessage(chatId,
             `✅ <b>Token bought successfully</b>\n\n` +
             `🪙 Token: ${result.tokenInfo.symbol || tokenMint}\n` +
             `💰 Spent: ${amount} SOL\n` +
             `📦 Received: ${formatNumber(result.amount)} tokens\n` +
-            `🔗 <a href="https://solscan.io/tx/${result.txid}">View Transaction</a>`,
-            { parse_mode: 'HTML', disable_web_page_preview: true }
+            `🔗 <a href="https://solscan.io/tx/${result.txid}">View Transaction</a>` +
+            extraMessage,
+            {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: replyMarkup
+            }
         );
+
     } else {
         await bot.sendMessage(chatId,
             `❌ <b>Buy failed</b>\n\nError: ${result.error}`,
@@ -1583,6 +1609,17 @@ if (data.startsWith('buy')) {
 
     return;
 }
+
+
+
+
+
+
+
+
+
+
+
 
 if (data.startsWith('sell_')) {
     const parts = data.split('_');
@@ -2448,42 +2485,46 @@ if (data === 'social_global') {
         
         // Handle set stop loss
         if (data.startsWith('set_stoploss_')) {
-            const tokenMint = data.replace('set_stoploss_', '');
-            
-            await bot.answerCallbackQuery(callbackQuery.id, {
-                text: 'Send stop loss price in USD. Example: 0.0025'
-            });
-            
-            // Get current price for reference
-            await getSolPriceUSD();
-            const currentPrice = await getTokenPrice(tokenMint);
-            const currentPriceUSD = currentPrice ? currentPrice * solPriceUSD : 0;
-            const tokenInfo = await getTokenInfo(tokenMint);
-            
-            await bot.sendMessage(chatId,
-                `🛑 <b>Set Stop Loss for ${tokenInfo.symbol}</b>\n\n` +
-                `Current Price: ${currentPriceUSD.toFixed(6)}\n` +
-                `Suggested Stop Loss: ${(currentPriceUSD * 0.8).toFixed(6)} (-20%)\n\n` +
-                `Reply with your stop loss price in USD.\n` +
-                `Example: <code>0.0025</code>`,
-                { parse_mode: 'HTML' }
-            );
-            
-            // Store context for next message
-            bot.once('message', async (msg) => {
-                if (msg.chat.id === chatId) {
-                    const price = parseFloat(msg.text);
-                    if (!isNaN(price) && price > 0) {
-                        await addPriceAlert(tokenMint, price, 'stoploss');
-                        await bot.sendMessage(chatId, `✅ Stop loss set at ${price.toFixed(6)}`);
-                        checkPriceAlerts();
-                    } else {
-                        await bot.sendMessage(chatId, '❌ Invalid price. Please use a positive number.');
-                    }
-                }
-            });
-            return;
+    const tokenMint = data.replace('set_stoploss_', '');
+    
+    await getSolPriceUSD(); // updates solPriceUSD
+    const currentPrice = await getTokenPrice(tokenMint);
+    const currentPriceUSD = currentPrice ? currentPrice * solPriceUSD : 0;
+
+    const tokenInfo = await getTokenInfo(tokenMint);
+
+    // Show price prompt immediately
+    await bot.sendMessage(chatId,
+        `🛑 <b>Set Stop Loss for ${tokenInfo.symbol}</b>\n\n` +
+        `💲 <b>Current Price:</b> $${currentPriceUSD.toFixed(6)}\n` +
+        `📉 <b>Suggested Stop:</b> $${(currentPriceUSD * 0.8).toFixed(6)} (-20%)\n\n` +
+        `Please reply with your stop-loss price in USD.\nExample: <code>0.0025</code>`,
+        { parse_mode: 'HTML' }
+    );
+
+    // Await next message for price input
+    bot.once('message', async (msg) => {
+        if (msg.chat.id === chatId) {
+            const price = parseFloat(msg.text);
+            if (!isNaN(price) && price > 0) {
+                await addPriceAlert(tokenMint, price, 'stoploss');
+                await bot.sendMessage(chatId,
+                    `✅ <b>Stop Loss Set</b>\n` +
+                    `🪙 Token: <code>${shortenAddress(tokenMint)}</code>\n` +
+                    `📉 Stop at: $${price.toFixed(6)}`,
+                    { parse_mode: 'HTML' }
+                );
+                checkPriceAlerts();
+            } else {
+                await bot.sendMessage(chatId, '❌ Invalid price. Please send a number like 0.0035');
+            }
         }
+    });
+
+    return;
+}
+
+
         
         // Handle set take profit
         if (data.startsWith('set_takeprofit_')) {
@@ -2683,6 +2724,7 @@ if (data === 'social_global') {
     }
 });
 
+
 bot.on('message', async msg => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -2724,6 +2766,11 @@ bot.on('message', async msg => {
         return;
     }
 });
+
+
+
+
+
 
 
 
@@ -3632,15 +3679,12 @@ async function monitorPositions() {
 
     // Get all positions with open balances
     for (const [tokenMint, history] of Object.entries(tradeHistory)) {
-        // Skip if no open position
         if (history.totalBought <= history.totalSold) continue;
 
         try {
-            // Get current balance
             const balance = await getTokenBalance(wallet.publicKey.toString(), tokenMint);
             if (balance === 0) continue;
 
-            // Get current price
             const currentPrice = await getTokenPrice(tokenMint);
             if (!currentPrice) continue;
 
@@ -3649,7 +3693,7 @@ async function monitorPositions() {
 
             console.log(`📊 ${tokenInfo.symbol}: ${profitPercent >= 0 ? '+' : ''}${profitPercent.toFixed(2)}% (${currentPrice.toFixed(8)} SOL)`);
 
-            // ✅ Inline profit target check instead of calling checkProfitTargets()
+            // ✅ Inline profit target check
             const trackedTarget = profitTargets[tokenMint];
             if (trackedTarget) {
                 const sellPct = trackedTarget.targetPct;
@@ -3657,7 +3701,7 @@ async function monitorPositions() {
                 const chatId = trackedTarget.chatId;
 
                 if (profitPercent >= sellPct) {
-                    const sellAmount = Math.floor(balance * autoSellPortion / 100 * 1e6); // assuming 6 decimals
+                    const sellAmount = Math.floor(balance * autoSellPortion / 100 * 1e6);
                     if (sellAmount > 0) {
                         try {
                             const quote = await getCachedJupiterQuote(
@@ -3696,48 +3740,51 @@ async function monitorPositions() {
                 }
             }
 
-            // Update trailing stop loss
+            // 🛡 Update trailing stop-loss if any
             await updateTrailingStopLoss(tokenMint);
 
-            // Check if position is at risk
+            // ⚠️ Position at risk
             if (profitPercent < -20 && !history.riskWarningsSent) {
                 history.riskWarningsSent = true;
-                await sendTelegramMessage(
-                    `⚠️ <b>POSITION AT RISK</b>\n\n` +
-    `Token: ${tokenInfo.symbol}\n` +
-    `Loss: ${profitPercent.toFixed(2)}%\n` +
-    `Current Price: ${currentPrice.toFixed(8)} SOL\n` +
-    `Avg Buy Price: ${history.averageBuyPrice.toFixed(8)} SOL\n\n` +
-    `Consider setting a stop loss or reducing position size.`,
-    {
-        parse_mode: 'HTML',
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
-                    { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
-                    { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
-                ],
-                [
-                    { text: '📈 View Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
-                    { text: '🦉 Birdeye', url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
-                ]
-            ]
-        }
-    }
-                );
+
+                        reply_markup: {
+                inline_keyboard: [
+        [
+            { text: '💸 Sell 25%', callback_data: `sell_25_${tokenMint}` },
+            { text: '💸 Sell 50%', callback_data: `sell_50_${tokenMint}` },
+            { text: '💸 Sell 100%', callback_data: `sell_100_${tokenMint}` }
+        ],
+        [
+            { text: '📈 View Chart', url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: '🦉 Birdeye', url: `https://birdeye.so/token/${tokenMint}?chain=solana` }
+        ],
+        [
+            { text: '🛒 Buy 0.001', callback_data: `buy_0.001_${tokenMint}` },
+            { text: '🛒 Buy 0.005', callback_data: `buy_0.005_${tokenMint}` }
+        ],
+        [
+            { text: '🛒 Buy 0.01', callback_data: `buy_0.01_${tokenMint}` },
+            { text: '🛒 Buy 0.05', callback_data: `buy_0.05_${tokenMint}` }
+        ],
+        [
+            { text: '🛑 Set Stop Loss', callback_data: `set_stoploss_${tokenMint}` }
+        ]
+    ]
+}
+
+
             }
 
         } catch (error) {
             console.error(`Error monitoring position ${tokenMint}: ${error.message}`);
         }
 
-        // Small delay between tokens
         await new Promise(resolve => setTimeout(resolve, 500));
     }
 
     console.log(`✅ Position monitoring complete\n`);
 }
+
 
 // ====== HELPER FUNCTIONS ======
 function shortenAddress(address) {
@@ -4483,7 +4530,6 @@ async function onWalletBuy(walletAddress, tokenMint) {
                 notifiedLowBalance = true;
             }
 
-            // Wait and retry every 10 seconds
             await new Promise(resolve => setTimeout(resolve, 10000));
             botSOLBalance = await getTokenBalance(CONFIG.OWNER_PUBLIC_KEY, CONFIG.WSOL_ADDRESS);
         }
@@ -4545,6 +4591,9 @@ async function onWalletBuy(walletAddress, tokenMint) {
                 ],
                 [
                     { text: "🔍 View Wallet", url: `https://solscan.io/account/${walletAddress}` }
+                ],
+                [
+                    { text: "🛑 Set Stop Loss", callback_data: `set_stoploss_${tokenMint}` } // ✅ ADDED
                 ]
             ]
         };
@@ -4562,6 +4611,7 @@ async function onWalletBuy(walletAddress, tokenMint) {
         await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `❌ Wallet copytrade failed: ${err.message}`);
     }
 }
+
 
 
 
@@ -4912,6 +4962,10 @@ function sendWalletOptionsMenu(chatId) {
         reply_markup: keyboard
     });
 }
+
+
+
+
 
 
 
